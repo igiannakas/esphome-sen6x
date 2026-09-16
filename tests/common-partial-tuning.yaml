@@ -1,0 +1,15 @@
+# Partial algorithm_tuning blocks: the schema defaults must fill in the keys left out.
+
+sensor:
+  - platform: sen6x
+    id: sen6x_partial_tuning
+    type: SEN65
+    i2c_id: i2c_bus
+    voc_index:
+      name: VOC Index
+      algorithm_tuning:
+        index_offset: 60
+    nox_index:
+      name: NOx Index
+      algorithm_tuning:
+        gain_factor: 45

@@ -1,0 +1,4 @@
+# Every option of every sensor, action and entity; validated by CI with `esphome config`.
+packages:
+  base: !include _base-esp32-idf.yaml
+  sen6x: !include common-all-options.yaml

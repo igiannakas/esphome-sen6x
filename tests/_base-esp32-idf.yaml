@@ -1,0 +1,18 @@
+# Shared by the config-validation tests: build straight from this checkout.
+esphome:
+  name: sen6x-test
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+logger:
+i2c:
+  - id: i2c_bus
+    scl: GPIO16
+    sda: GPIO17
+    scan: true
+external_components:
+  - source:
+      type: local
+      path: ../components
+    components: [sen6x]

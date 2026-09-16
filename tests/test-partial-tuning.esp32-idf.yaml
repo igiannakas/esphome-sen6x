@@ -1,0 +1,3 @@
+packages:
+  base: !include _base-esp32-idf.yaml
+  sen6x: !include common-partial-tuning.yaml

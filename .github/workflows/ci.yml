@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  esphome-config:
+    name: ESPHome config validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install esphome
+      - name: Every option on every platform
+        run: |
+          for f in tests/test-*.yaml; do esphome config "$f" > /dev/null; done
+      - name: Examples
+        run: |
+          cp examples/secrets.yaml.example examples/secrets.yaml
+          for f in examples/*.yaml; do
+            [ "$(basename "$f")" = secrets.yaml ] && continue
+            esphome config "$f" > /dev/null
+          done
