@@ -505,6 +505,7 @@ void SEN6XComponent::poll_data_ready_() {
   if (this->poll_retries_remaining_ == 0) {
     this->status_set_warning();
     ESP_LOGD(TAG, "Data not ready");
+    this->finish_poll_cycle_();
     return;
   }
   ESP_LOGV(TAG, "Data ready polling attempt %u",
@@ -514,6 +515,7 @@ void SEN6XComponent::poll_data_ready_() {
   if (!this->write_command(SEN6X_CMD_GET_DATA_READY_STATUS)) {
     this->status_set_warning();
     ESP_LOGD(TAG, "write data ready status error (%d)", this->last_error_);
+    this->finish_poll_cycle_();
     return;
   }
 
@@ -522,6 +524,7 @@ void SEN6XComponent::poll_data_ready_() {
     if (!this->read_data(&raw_read_status, 1)) {
       this->status_set_warning();
       ESP_LOGD(TAG, "read data ready status error (%d)", this->last_error_);
+      this->finish_poll_cycle_();
       return;
     }
 
@@ -539,6 +542,7 @@ void SEN6XComponent::read_measurements_() {
   if (!this->write_command(this->read_cmd_)) {
     this->status_set_warning();
     ESP_LOGD(TAG, "Read measurement failed (%d)", this->last_error_);
+    this->finish_poll_cycle_();
     return;
   }
 
@@ -551,6 +555,7 @@ void SEN6XComponent::parse_and_publish_measurements_() {
   if (!this->read_data(measurements, this->read_words_)) {
     this->status_set_warning();
     ESP_LOGD(TAG, "Read data failed (%d)", this->last_error_);
+    this->finish_poll_cycle_();
     return;
   }
   int8_t voc_index = -1;
@@ -687,6 +692,7 @@ void SEN6XComponent::read_number_concentration_() {
   if (!this->write_command(SEN6X_CMD_READ_NUMBER_CONCENTRATION)) {
     this->status_set_warning();
     ESP_LOGD(TAG, "Read measurement failed (%d)", this->last_error_);
+    this->finish_poll_cycle_();
     return;
   }
 
@@ -699,6 +705,7 @@ void SEN6XComponent::parse_and_publish_number_concentration_() {
   if (!this->read_data(measurements, 5)) {
     this->status_set_warning();
     ESP_LOGD(TAG, "Read data failed (%d)", this->last_error_);
+    this->finish_poll_cycle_();
     return;
   }
 
@@ -871,7 +878,9 @@ bool SEN6XComponent::load_voc_state_and_restore_() {
   return this->write_config_words_(SEN6X_CMD_VOC_ALGORITHM_STATE, this->voc_state_, 4);
 }
 
-// End of one update cycle's I2C chain: the point at which a queued state read cannot collide
+// End of one update cycle's I2C chain, whether it published or died on a bus error: the bus is free
+// again and a queued state read cannot collide. Every terminal exit of the chain comes here; the
+// two device-status failure paths do not, because they continue into poll_data_ready_().
 void SEN6XComponent::finish_poll_cycle_() {
   this->poll_active_ = false;
   this->service_pending_voc_save_();
