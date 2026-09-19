@@ -456,6 +456,7 @@ void SEN6XComponent::update() {
 
   // Cancel any in-flight polling from a previous update() cycle before touching the bus.
   this->cancel_timeout(TIMEOUT_POLL);
+  this->poll_active_ = true;
 
   bool wrote_pressure = false;
   if (this->ambient_pressure_source_ != nullptr && this->co2_sensor_ != nullptr) {
@@ -504,6 +505,7 @@ void SEN6XComponent::poll_data_ready_() {
   if (this->poll_retries_remaining_ == 0) {
     this->status_set_warning();
     ESP_LOGD(TAG, "Data not ready");
+    this->finish_poll_cycle_();
     return;
   }
   ESP_LOGV(TAG, "Data ready polling attempt %u",
@@ -513,6 +515,7 @@ void SEN6XComponent::poll_data_ready_() {
   if (!this->write_command(SEN6X_CMD_GET_DATA_READY_STATUS)) {
     this->status_set_warning();
     ESP_LOGD(TAG, "write data ready status error (%d)", this->last_error_);
+    this->finish_poll_cycle_();
     return;
   }
 
@@ -521,6 +524,7 @@ void SEN6XComponent::poll_data_ready_() {
     if (!this->read_data(&raw_read_status, 1)) {
       this->status_set_warning();
       ESP_LOGD(TAG, "read data ready status error (%d)", this->last_error_);
+      this->finish_poll_cycle_();
       return;
     }
 
@@ -538,6 +542,7 @@ void SEN6XComponent::read_measurements_() {
   if (!this->write_command(this->read_cmd_)) {
     this->status_set_warning();
     ESP_LOGD(TAG, "Read measurement failed (%d)", this->last_error_);
+    this->finish_poll_cycle_();
     return;
   }
 
@@ -550,6 +555,7 @@ void SEN6XComponent::parse_and_publish_measurements_() {
   if (!this->read_data(measurements, this->read_words_)) {
     this->status_set_warning();
     ESP_LOGD(TAG, "Read data failed (%d)", this->last_error_);
+    this->finish_poll_cycle_();
     return;
   }
   int8_t voc_index = -1;
@@ -686,6 +692,7 @@ void SEN6XComponent::read_number_concentration_() {
   if (!this->write_command(SEN6X_CMD_READ_NUMBER_CONCENTRATION)) {
     this->status_set_warning();
     ESP_LOGD(TAG, "Read measurement failed (%d)", this->last_error_);
+    this->finish_poll_cycle_();
     return;
   }
 
@@ -698,6 +705,7 @@ void SEN6XComponent::parse_and_publish_number_concentration_() {
   if (!this->read_data(measurements, 5)) {
     this->status_set_warning();
     ESP_LOGD(TAG, "Read data failed (%d)", this->last_error_);
+    this->finish_poll_cycle_();
     return;
   }
 
@@ -771,6 +779,7 @@ void SEN6XComponent::stop_measurement() {
   }
   // Stop any in-flight polling before the device goes idle
   this->cancel_timeout(TIMEOUT_POLL);
+  this->poll_active_ = false;
   if (!this->write_command(SEN6X_CMD_STOP_MEASUREMENTS)) {
     this->status_set_warning();
     ESP_LOGW(TAG, "Stop measurement failed (%d)", this->last_error_);
@@ -869,8 +878,13 @@ bool SEN6XComponent::load_voc_state_and_restore_() {
   return this->write_config_words_(SEN6X_CMD_VOC_ALGORITHM_STATE, this->voc_state_, 4);
 }
 
-// End of one update cycle's I2C chain: the point at which a queued state read cannot collide
-void SEN6XComponent::finish_poll_cycle_() { this->service_pending_voc_save_(); }
+// End of one update cycle's I2C chain, whether it published or died on a bus error: the bus is free
+// again and a queued state read cannot collide. Every terminal exit of the chain comes here; the
+// two device-status failure paths do not, because they continue into poll_data_ready_().
+void SEN6XComponent::finish_poll_cycle_() {
+  this->poll_active_ = false;
+  this->service_pending_voc_save_();
+}
 
 void SEN6XComponent::save_voc_state() {
   if (!this->initialized_ || !this->voc_supported_) {
@@ -878,13 +892,15 @@ void SEN6XComponent::save_voc_state() {
     return;
   }
   // Queued rather than run here: the poll chain may hold the bus. Measuring cycles service the
-  // flag at the end of the chain and idle cycles from update(), so the trigger always takes
+  // flag at the end of the chain and idle cycles from update(), so the trigger always takes.
+  // Only when no chain is in flight does the read go out straight away.
   this->voc_save_pending_ = true;
-  this->service_pending_voc_save_();
+  if (!this->poll_active_)
+    this->service_pending_voc_save_();
 }
 
 void SEN6XComponent::service_pending_voc_save_() {
-  if (!this->voc_save_pending_ || this->voc_sequence_active_ || this->command_blocked_())
+  if (!this->voc_save_pending_ || this->voc_sequence_active_ || this->poll_active_ || this->command_blocked_())
     return;
 
   if (!this->write_command(SEN6X_CMD_VOC_ALGORITHM_STATE)) {

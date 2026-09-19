@@ -178,6 +178,9 @@ class SEN6XComponent final : public PollingComponent, public sensirion_common::S
   bool voc_save_pending_{false};
   // Set while a stop/write/start sequence owns the bus, so nothing else writes underneath it
   bool voc_sequence_active_{false};
+  // Set from the first bus write of a poll cycle until finish_poll_cycle_(), so a queued VOC state
+  // read waits for the chain instead of landing between one of its writes and the matching read
+  bool poll_active_{false};
   bool restore_voc_state_on_boot_{true};
   uint16_t voc_state_[4]{0};
   ESPPreferenceObject voc_pref_;
