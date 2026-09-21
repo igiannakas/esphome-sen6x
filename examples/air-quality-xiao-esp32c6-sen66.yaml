@@ -68,7 +68,7 @@ substitutions:
   pin_scl: D5
   pin_status_led: D1
 
-  # --- SEN6x  (PM / VOC / NOx / temp / humidity, +CO2 on 66) 
+  # --- SEN6x  (PM / VOC / NOx / temp / humidity, +CO2 on 66)
   #
   # temp_offset compensates for self-heating near the sensor.
   # Measure against a reference and adjust:
@@ -83,7 +83,7 @@ substitutions:
   # every SEN6x part publishes — see WATCHDOG further down.
   #
   sen6x_sample_interval: 10s
-  sen6x_temp_offset: "-0.29"
+  sen6x_temp_offset: "-0.30"
   sen6x_timeout_ms: "60000"
 
   # --- AIR QUALITY TIERS  (l1 / l2 / l3 per channel) --------
@@ -138,34 +138,15 @@ substitutions:
   #
   #                          BEDROOM       STUDY (3D printer)
   #   ---------------------  ------------  ------------------
-  #   dirty duty cycle       ~33%          ~96%
   #   event length           8h nightly    24h+ per print
   #   gating_minutes         720           3000  (the maximum)
-  #   offset_hours           48            240
-  #   gain_hours             12 (default)  240
+  #   offset_hours           24            24
+  #   gain_hours             24            24
   #
-  # Bedroom: 16 clean hours a day pull the baseline back on
-  # their own, so 48h (~4 days memory) keeps an overnight rise
-  # visible. Gain stays at default because the daily swing is
-  # what the scale should calibrate against.
-  #
-  # Study: dirty almost all the time, so nothing pulls the
-  # baseline back. Gating is maxed to cover a whole print, the
-  # long constants are the backstop for when the gating budget
-  # runs out, and gain is stretched because a steady print
-  # collapses the variance estimate.
-  #
-  # Two caveats. The baseline re-anchors in the ~45 min after
-  # every reset, which is what VOC BASELINE PERSISTENCE below
-  # exists to avoid paying on every reflash. And
-  # gating may never fire in a bedroom at all — the threshold
-  # looks to be index 340, which comes from Sensirion's SGP
-  # host library rather than the SEN6x datasheet, so treat it
-  # as indicative.
   #
   voc_gating_max_duration_minutes: "720"
-  voc_learning_time_offset_hours: "48"
-  voc_learning_time_gain_hours: "12"
+  voc_learning_time_offset_hours: "24"
+  voc_learning_time_gain_hours: "24"
 
   # --- ROOM MEASUREMENTS  (9 Sep, this room) ----------------
   #
@@ -354,7 +335,7 @@ substitutions:
   # breathe_fade the fade inside it — keep fade just under step
   # or the ramp is still moving when the step ends.
   #
-  led_brightness: "50%"
+  led_brightness: "70%"
   led_flash_on: 200ms
   led_flash_off: 800ms
   led_breathe_step: 2000ms
@@ -377,14 +358,14 @@ substitutions:
 # in idle mode as the datasheet requires.
 #
 # refresh re-fetches the branch head hourly, so a rebase or
-# force-push changes the build underneath you — pin a release tag or
-# commit SHA (source: ...@v1.0.0) once this device is settled.
+# force-push changes the build underneath you — swap @sen6x
+# for a commit SHA once this device is settled.
 # ============================================================
 
 external_components:
   - source: github://igiannakas/esphome-sen6x
     components: [sen6x]
-    refresh: 0s
+    refresh: always
 
 # ============================================================
 # FIRMWARE
@@ -448,14 +429,11 @@ ota:
         - sen6x.save_voc_state: sen6x_dev
 
 wifi:
-  power_save_mode: HIGH
   ssid: "${wifi_ssid}"
   password: "${wifi_password}"
   ap:
     ssid: "${device_name} Fallback"
     password: "${wifi_password}"
-
-  # use_address: 192.168.1.10   # fixed IP, if you use one
 captive_portal:
 
 web_server:
@@ -576,6 +554,14 @@ globals:
   # Consecutive settled samples counting toward release
   - id: window_settle_run
     type: uint8_t
+    restore_value: no
+    initial_value: '0'
+
+  # Automated VOC saves since boot. The save interval below
+  # bumps it, so HA history shows each save at its exact time.
+  # The first one lands within seconds of boot.
+  - id: voc_save_count
+    type: uint32_t
     restore_value: no
     initial_value: '0'
 
@@ -917,6 +903,32 @@ sensor:
     name: "ESP - WiFi Signal"
     entity_category: diagnostic
     update_interval: ${diag_interval}
+
+  # Seconds since boot. Resets on a reboot; keeps climbing
+  # through an API reconnect, which is how the two are told
+  # apart in HA history.
+  - platform: uptime
+    name: "ESP - Uptime"
+    entity_category: diagnostic
+    update_interval: ${diag_interval}
+
+  # ----------------------------------------------------------
+  # VOC SAVES  —  one step per automated baseline save
+  #
+  # Counts the interval trigger, not the button or OTA save.
+  # update_interval: never — published from the interval, so a
+  # step in HA history is a save, timestamped. Drops back to
+  # zero on a reboot, which HA reads as a reset.
+  # ----------------------------------------------------------
+  - platform: template
+    id: voc_save_counter
+    name: "SEN - VOC Saves"
+    icon: mdi:content-save-cog
+    entity_category: diagnostic
+    accuracy_decimals: 0
+    state_class: total_increasing
+    update_interval: never
+    lambda: 'return id(voc_save_count);'
 
 # ============================================================
 # BUTTONS
@@ -1636,6 +1648,8 @@ interval:
   - interval: ${voc_state_save_interval}
     then:
       - sen6x.save_voc_state: sen6x_dev
+      - lambda: 'id(voc_save_count) += 1;'
+      - component.update: voc_save_counter
 
   # ----------------------------------------------------------
   # LED SELF-HEAL
