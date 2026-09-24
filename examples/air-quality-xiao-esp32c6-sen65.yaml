@@ -1,48 +1,22 @@
 # ============================================================
 # AIR QUALITY  —  XIAO ESP32-C6 + SEN65 + VEML7700
+#
+# The settings for one node. The logic is in
+# common/air-quality-core.yaml, which must sit next to this
+# file.
+#
+# Values ending _default only set a starting value in Home
+# Assistant. After the first boot, change them there.
 # ============================================================
 
 substitutions:
 
-  # Anything ending _default seeds a number: entity on first
-  # boot and nothing after: HA owns the live value from then on,
-  # so editing it here does nothing to a device already
-  # running. Everything else is compile-time.
-
   # --- SENSOR MODEL -----------------------------------------
   #
-  # Which SEN6x is fitted. Everything model-specific is either
-  # in this block or in one tagged "# MODEL:" further down, so
-  # `grep MODEL:` finds the whole switch:
-  #
-  #                    SEN66 (CO2)     SEN65 (no CO2)
-  #   ---------------  --------------  ----------------
-  #   sen_model        SEN66           SEN65
-  #   co2_state        id(...).state   -1
-  #   co2_fault        id(...).state   false
-  #   MODEL: blocks    uncommented     commented out
-  #
-  # -1 and not NAN for an absent CO2 channel: the level lambda
-  # gates on isnan to hold off until every channel has read, so
-  # NAN would pin it at "waiting for first readings" forever.
-  # -1 clears that gate and then tiers to 0, so a channel that
-  # is not there simply never sets the worst-of.
-  #
-  # Leaving the MODEL: blocks in on a part with no CO2 is the
-  # trap this avoids. The component logs "CO2 requires SEN63C,
-  # SEN66, or SEN69C" once and drops the sensor, but the entity
-  # is still registered and just never receives a state — so
-  # co2_state would be NAN for good and the LED would sit at
-  # "waiting" with nothing in the log to say why.
-  #
-  # sen_model feeds the component's type:, which is optional —
-  # it reads the product name off the device at boot and infers
-  # the part either way. Setting it makes flashing this onto
-  # the wrong sensor one loud "Configured type (used)
-  # mismatches product" warning instead of a scatter of
-  # per-channel errors, and it is what dump_config reports
-  # before the product read lands. The configured value wins,
-  # so a wrong one is worse than none.
+  # For a SEN66, set sen_model: SEN66,
+  # co2_state: "id(sen6x_co2).state" and
+  # co2_fault: "id(sen6x_co2_error).state", and uncomment the
+  # MODEL: block at the end of this file.
   #
   sen_model: SEN65
   co2_state: "-1"
@@ -52,57 +26,43 @@ substitutions:
   device_name: bedroom-air-quality
   friendly_name: "Bedroom Air Quality"
 
-  # --- NETWORK ----------------------------------------------
+  # --- NETWORK  (values in secrets.yaml) --------------------
   wifi_ssid: !secret wifi_ssid
   wifi_password: !secret wifi_password
 
-  # --- PINS  (Seeed XIAO ESP32-C6) --------------------------
-  #
-  # Silkscreen names
-  #
-  #   D1   GPIO1
-  #   D4   GPIO22
-  #   D5   GPIO23
-  #
+  # --- PINS  (XIAO ESP32-C6 silkscreen names) ---------------
   pin_sda: D4
   pin_scl: D5
   pin_status_led: D1
 
-  # --- SEN6x  (PM / VOC / NOx / temp / humidity, +CO2 on 66)
+  # --- SEN6x ------------------------------------------------
   #
-  # temp_offset compensates for self-heating near the sensor.
-  # Measure against a reference and adjust:
+  # temp_offset corrects for the board warming the sensor.
+  # Check against a reference thermometer. Typical values:
   #
   #   -0.30   open board
-  #   -0.98   enclosed, large case
-  #   -1.16   enclosed, smaller case
+  #   -0.98   large enclosure
+  #   -1.16   small enclosure
   #
-  # timeout_ms = 6 missed cycles before the sensor counts as
-  # dead. Past the boot warm-up, still caught inside a minute.
-  # The cycles are counted on the temperature channel, which
-  # every SEN6x part publishes — see WATCHDOG further down.
+  # timeout_ms is how long without a reading before the sensor
+  # is reported as not responding.
   #
   sen6x_sample_interval: 10s
   sen6x_temp_offset: "-0.30"
   sen6x_timeout_ms: "60000"
 
-  # --- AIR QUALITY TIERS  (l1 / l2 / l3 per channel) --------
+  # --- AIR QUALITY LEVELS -----------------------------------
   #
-  # CO2 (ppm), anchored to BB101 2018. Inert on a part with no
-  # CO2 channel, where co2_state is -1 and tiers to 0:
+  # Each reading is scored against its three thresholds and the
+  # LED shows the worst score:
   #
-  #   1000   mechanically-ventilated daily-average limit
-  #   1500   naturally-ventilated daily-average limit, and the
-  #          mechanical 20-minute maximum — the real "open a
-  #          window" point for a bedroom
+  #   below l1    good        green
+  #   l1 to l2    elevated    amber
+  #   l2 to l3    poor        red
+  #   above l3    ventilate   flashing red
   #
-  # PM1 / PM2.5 (ug/m3), US EPA AQI 24h breakpoints:
-  #
-  #   36     start of Unhealthy for Sensitive Groups (35.5)
-  #   55     start of Unhealthy (55.5)
-  #
-  # PM4 / PM10 hold a 1.4167x ratio to the PM2.5 scale
-  # (17/12 = 51/36), so the top tier is 55 x 1.4167 = 78.
+  # CO2 is in ppm, PM in ug/m3. The pm25 levels also apply to
+  # PM1, and the pm10 levels to PM4.
   #
   co2_l1: "800"
   co2_l2: "1000"
@@ -124,96 +84,41 @@ substitutions:
   nox_l2: "150"
   nox_l3: "300"
 
-  # --- VOC ALGORITHM TUNING ---------------------------------
+  # --- VOC LEARNING -----------------------------------------
   #
-  # The VOC Index is relative: it scores the air against what
-  # this sensor has learned is typical here, so these tune the
-  # learning, not the chemistry.
+  # The VOC Index compares the air with what the sensor has
+  # learned is normal for the room.
   #
-  #   offset_hours     how fast "typical" chases the room
-  #                    (memory is ~2x this, per the datasheet)
-  #   gain_hours       same, for how big a swing counts as big
-  #   gating_minutes   cap on how long learning stays frozen
-  #                    during a high reading
-  #
-  #                          BEDROOM       STUDY (3D printer)
-  #   ---------------------  ------------  ------------------
-  #   event length           8h nightly    24h+ per print
-  #   gating_minutes         720           3000  (the maximum)
-  #   offset_hours           24            24
-  #   gain_hours             24            24
-  #
+  #   gating_max_duration_minutes   longest a high reading can
+  #                                 pause learning. 720 suits a
+  #                                 bedroom, 3000 a room with a
+  #                                 3D printer
+  #   learning_time_offset_hours    how quickly "normal" adapts
+  #   learning_time_gain_hours      how quickly the scale adapts
   #
   voc_gating_max_duration_minutes: "720"
   voc_learning_time_offset_hours: "24"
   voc_learning_time_gain_hours: "24"
 
-  # --- ROOM MEASUREMENTS  (9 Sep, this room) ----------------
+  # --- OPEN WINDOW DETECTION --------------------------------
   #
-  # One afternoon of data, and the source of every threshold in
-  # the two blocks below. Re-measure before trusting any of it
-  # in another room.
+  # A window is reported open when the room cools quickly, and
+  # closed when it warms back up. The open and close rates are
+  # set in Home Assistant; watch Window - Temperature Rate
+  # during an airing to tune them.
   #
-  #   TEMPERATURE RATE (degC/min)
-  #     quiet-room noise    +/-0.01
-  #     background drift    -0.015
-  #     window opening      -0.44 peak, recovery peaks at +0.07
-  #     sun on the board    +0.75 warming, -0.65 cooling
+  #   temp_rate_interval_s          how often the rate updates
+  #   temp_rate_window              readings it averages over
+  #   window_open_samples           readings in a row to
+  #                                 report open
+  #   window_close_samples          readings in a row to
+  #                                 report closed
+  #   window_max_hold_default_min   report closed after this
+  #                                 many minutes regardless
   #
-  #   SUN EVENT
-  #     ALS peaked          2,700 lx  (not tens of 1000s)
-  #     temperature rose    22.8 -> 34.0 degC in ~15 min
-  #     stayed hot          ~65 min past the peak
-  #
-  # Two rows carry the whole design. Sun cools harder than a
-  # window opens (-0.65 against -0.44), so magnitude alone
-  # cannot separate them. But sun has to warm before it can
-  # cool (+0.75) and a genuine recovery never does (+0.07) —
-  # which is why the lockout below arms on warming and not on
-  # lux alone, and so also catches a radiator or a lamp.
-  #
-  # The light peak is the other surprise: indoor daylight is
-  # hundreds of lx, not thousands, so the lockout threshold has
-  # to sit far lower than "sunlight" suggests.
-  #
-  # One caveat on that figure. Both light thresholds in this
-  # file now read the VEML's full-spectrum (WHITE) channel, and
-  # 2,700 was measured on ALS. Direct sun is the most
-  # near-IR-heavy thing this sensor will ever see, so the same
-  # event reads materially higher on WHITE — which leaves 500
-  # conservative, arming the lockout earlier than it used to.
-  # Re-measure the peak against Full Spectrum and set Window -
-  # Sun Lockout Illuminance in HA from that; the substitution
-  # below only seeds a device on its first boot.
-
-  # --- OPEN WINDOW DETECTION  (temperature rate) ------------
-  #
-  # Rate = (now - oldest sample in the ring) / ring span, so
-  # window x interval sets both the smoothing and how far back
-  # it looks.
-  #
-  # The detector latches: a sustained fall opens it, a
-  # sustained recovery closes it, each needing _samples
-  # consecutive readings. The counts are asymmetric on purpose
-  # (2 to assert, 4 to clear) — a false positive costs you a
-  # breathing LED, a false clear says "shut" while the window
-  # is still wide open.
-  #
-  # Latency is the time for the averaged rate to cross the
-  # threshold plus the confirmations. The rate crosses
-  # open_rate once the accumulated fall reaches
-  # open_rate x span (0.3 degC here), so a room cooling at
-  # 0.2 degC/min latches in ~2.5 min. A gentler fall takes
-  # proportionally longer, which is the point.
-  #
-  # open_rate at -0.10 sits 10x above the measured noise and 4x
-  # below the measured event. close_rate is much smaller
-  # because a room reheats far slower than a draught cools it:
-  # too high and the flag never clears in an unheated room, too
-  # low and a heating cycle clears it with the window still
-  # open. Expect to spend the tuning effort there.
-  #
-  # max_hold is a safety valve rather than part of the model.
+  # Anything that cools the room quickly reads as an open
+  # window, and a window onto air at room temperature is not
+  # noticed.
   #
   temp_rate_interval_s: "30"
   temp_rate_window: "6"
@@ -224,104 +129,50 @@ substitutions:
   window_close_samples: "4"
   window_max_hold_default_min: "60"
 
-  # --- SUN / HEAT LOCKOUT -----------------------------------
+  # --- SUN LOCKOUT ------------------------------------------
   #
-  # Sun on the board heats the sensor, and when it moves off
-  # the cooling reads exactly like a window opening. See ROOM
-  # MEASUREMENTS above for the numbers this is built on;
-  # heat_spike_rate sits between the two rates that matter,
-  # well above a real recovery and well below a sun event.
+  # Sun on the board warms it, and the cooling afterwards looks
+  # like an open window. Detection pauses while the light is
+  # above the lockout level or the board warms faster than the
+  # heat spike rate, and resumes once the temperature has
+  # settled for window_settle_samples readings, or after the
+  # lockout time.
   #
-  # A state machine, not a timer:
-  #
-  #   ARM       bright light, or warming past heat_spike_rate
-  #   HOLD      stay locked while the board sheds that heat
-  #   RELEASE   light back below threshold AND the rate
-  #             settled inside the close_rate band for
-  #             settle_samples running
-  #
-  # Watching the settle beats guessing a cooldown: on 9 Sep it
-  # would have re-armed at ~5:53 PM instead of 6:35.
-  # lockout_minutes is only a ceiling on a slow settle.
-  #
-  # Only the OPEN edge is suppressed — a latched window must
-  # still be able to close.
-  #
-  # The light test reads full spectrum rather than illuminance.
-  # What heats the board is radiant energy, and the ALS curve
-  # is eye-weighted — it discards the near-IR that carries much
-  # of it, which is exactly the part a sun event is richest in.
-  #
-  # The number entity keeps the name Window - Sun Lockout
-  # Illuminance. Renaming it would change its object id, which
-  # orphans the HA entity and resets the value stored in flash
-  # behind restore_value — not worth a tidier label.
+  # The lockout level is compared with Full Spectrum, not
+  # Illuminance. Set it in Home Assistant from what Full
+  # Spectrum shows with sun on the board.
   #
   sun_lockout_lux_default: "500"
   sun_lockout_minutes_default: "45"
   heat_spike_rate_default: "0.30"
   window_settle_samples: "3"
 
-  # --- VOC BASELINE PERSISTENCE -----------------------------
+  # --- VOC BASELINE SAVE ------------------------------------
   #
-  # The VOC state is the learning above, frozen: eight opaque
-  # bytes the sensor hands over on request and takes back in
-  # idle mode. Storing it in flash and handing it back at boot
-  # is what stops a reflash from re-anchoring the baseline.
-  #
-  # The component never saves on its own, so this file decides
-  # when. Three triggers, in order of how much they matter:
-  #
-  #   OTA start   the reboot the state exists to bridge, and
-  #               the device is still running normally here, so
-  #               the read completes. on_shutdown is too late —
-  #               the save finishes on a 20 ms timer that a
-  #               shutting-down loop never runs.
-  #   interval    insurance against a power cut, which gives no
-  #               warning at all
-  #   buttons     before anything deliberate
-  #
-  # A save is one 8-byte NVS write; at 6h that is ~1,500 a year
-  # against wear levelling built for far more. The interval is
-  # also the age of the worst state you can ever restore, and
-  # Sensirion intend this for short interruptions — hours, not
-  # weeks — so shortening it buys more than lengthening it.
+  # How often the learned VOC baseline is saved, so a restart
+  # or power cut does not reset it. The first save is one
+  # interval after boot. Press SEN - VOC Baseline Save before
+  # a planned restart.
   #
   voc_state_save_interval: 6h
 
-  # --- VEML7700  (ambient light) ----------------------------
+  # --- LIGHT SENSOR -----------------------------------------
   #
-  # Sampling and publishing are separate: the LED reads the raw
-  # sample and reacts within one sample interval, while HA only
-  # hears about changes worth recording.
+  # With LED - Ambient Light Control on, the LED only lights
+  # when the room is lit. The threshold is set in Home
+  # Assistant and compared with Full Spectrum:
   #
-  #   sample_interval     how often the sensor is read
-  #   publish_min_gap     hard ceiling on publish rate
-  #   publish_delta       publish on a >= this much change
-  #   publish_heartbeat   keep-alive this often regardless
+  #   below 1     dark room
+  #   1 to 5      phone or TV glow
+  #   20 to 50    bedside lamp
+  #   100 to 300  ceiling light
+  #   above 500   daylight
   #
-  # dark_room_threshold's live value is the LED - Ambient Light
-  # Threshold number in HA. It is compared against the VEML's
-  # full-spectrum (WHITE) channel, not the ALS channel behind
-  # the Illuminance entity.
-  #
-  # Both are reported in lx on one scale: the component turns
-  # WHITE counts into lux with the same resolution factor, the
-  # same high-lux compensation and the same glass attenuation
-  # it applies to ALS. WHITE also sees near-IR, so it reads
-  # higher than ALS under anything IR-rich — incandescent and
-  # halogen most of all, then daylight, with white LED and
-  # fluorescent close to level.
-  #
-  #   < 1        unlit bedroom at night
-  #   1 - 5      phone/TV glow, light under the door
-  #   20 - 50    bedside lamp
-  #   100 - 300  ceiling light
-  #   > 500      daylight
-  #
-  # Those were measured on ALS, so read them as a floor and
-  # re-check the threshold against Full Spectrum in the room
-  # it is going to run in.
+  #   lux_sample_interval     how often the sensor is read
+  #   lux_publish_min_gap     shortest time between updates
+  #                           to Home Assistant
+  #   lux_publish_delta       send an update on this much change
+  #   lux_publish_heartbeat   send an update at least this often
   #
   lux_sample_interval: 2s
   lux_publish_min_gap: 4s
@@ -331,9 +182,9 @@ substitutions:
 
   # --- STATUS LED -------------------------------------------
   #
-  # breathe_step is how long each half of a breath lasts and
-  # breathe_fade the fade inside it — keep fade just under step
-  # or the ramp is still moving when the step ends.
+  # Flashing is used for "ventilate" and sensor faults,
+  # breathing for an open window. Keep breathe_fade just under
+  # breathe_step.
   #
   led_brightness: "70%"
   led_flash_on: 200ms
@@ -341,1514 +192,39 @@ substitutions:
   led_breathe_step: 2000ms
   led_breathe_fade: 1800ms
 
-  # --- DIAGNOSTICS  (WiFi, die temp, VEML range state) ------
+  # --- DIAGNOSTICS ------------------------------------------
+  #
+  # How often Wi-Fi signal, uptime and chip temperature are
+  # reported.
+  #
   diag_interval: 60s
 
 # ============================================================
-# EXTERNAL COMPONENTS
+# CORE
 #
-# sen6x is not in ESPHome core yet. This is my own branch,
-# consolidating the five open sen6x PRs (#18780 CO2 config,
-# #18781 temperature/startup, #18782 number concentration,
-# #18783 actions, #18784 device status) on top of dev.
+# The shared logic. It lives in a subfolder so the ESPHome
+# dashboard does not list it as a device.
+# ============================================================
+
+packages:
+  core: !include common/air-quality-core.yaml
+
+# ============================================================
+# MODEL: SEN66 only
 #
-# On top of those five: VOC algorithm state save / restore
-# (0x6181) and a VOC engine reset via device reset (0xD304),
-# with the boot-time reset moved behind a stop so it is issued
-# in idle mode as the datasheet requires.
+# The CO2 reading and its error flag. Uncomment for a SEN66.
+# ============================================================
+
+# sensor:
+#   - id: !extend sen6x_dev
+#     co2:
+#       id: sen6x_co2
+#       name: "CO2"
 #
-# refresh re-fetches the branch head hourly, so a rebase or
-# force-push changes the build underneath you — swap @sen6x
-# for a commit SHA once this device is settled.
-# ============================================================
-
-external_components:
-  - source: github://igiannakas/esphome-sen6x
-    components: [sen6x]
-    refresh: always
-
-# ============================================================
-# FIRMWARE
-# ============================================================
-
-esphome:
-  name: ${device_name}
-  friendly_name: "${friendly_name}"
-  on_boot:
-    # Antenna before the radio exists. 700 rather than 800 so
-    # the GPIO outputs — which set up at 800 — have configured
-    # the pins by the time this writes them, and still far
-    # clear of WiFi at 250.
-    - priority: 700
-      then:
-        # Both low: RF switch powered, PCB antenna selected.
-        - output.turn_off: rf_switch_power
-        - output.turn_off: antenna_select
-
-    - priority: -100
-      then:
-        - delay: 1s
-        - script.execute: update_status_led
-
-esp32:
-  board: seeed_xiao_esp32c6
-  framework:
-    type: esp-idf
-  cpu_frequency: 80MHz
-
-# UART logging off (saves the serial pins and some CPU); the
-# rest reaches the ESPHome log stream over the API.
-#
-# INFO, not WARN, because the VOC baseline confirmations
-# ("Saved VOC state: ...", "Restoring VOC state: ...") are INFO
-# lines. level: is a compile-time ceiling, so at WARN they are
-# not filtered at runtime — they are not in the binary at all —
-# and a per-tag logs: entry may not be more verbose than the
-# global level, so there is no way to keep WARN and see them.
-# INFO costs boot and connection lines, not per-reading traffic.
-#
-# Drop back to WARN once the saves are proven; SEN - VOC
-# Baseline Stored below reports the same thing without logs.
-logger:
-  level: INFO
-  baud_rate: 0
-
-# ============================================================
-# CONNECTIVITY
-# ============================================================
-
-api:
-
-ota:
-  - platform: esphome
-    # Save the VOC baseline before the update reboots the node.
-    # Safe here in a way on_shutdown is not: the loop is still
-    # running, so the 20 ms read and the NVS write both land.
-    on_begin:
-      then:
-        - sen6x.save_voc_state: sen6x_dev
-
-wifi:
-  ssid: "${wifi_ssid}"
-  password: "${wifi_password}"
-  ap:
-    ssid: "${device_name} Fallback"
-    password: "${wifi_password}"
-captive_portal:
-
-web_server:
-  port: 80
-
-# ============================================================
-# I2C BUS   (pins in the PINS block at the top)
-#
-# VEML7700 = 0x10   SEN6x = 0x6B
-# ============================================================
-
-i2c:
-  sda: ${pin_sda}
-  scl: ${pin_scl}
-  scan: true
-
-# ============================================================
-# ANTENNA
-#
-# The module carries both a PCB antenna and a u.FL socket with
-# an RF switch picking between them. This node uses the PCB
-# antenna, so both pins are simply held low:
-#
-#   GPIO3    RF switch power   LOW = powered
-#   GPIO14   antenna select    LOW = internal
-#
-# Powering the switch is the part that matters. Left alone it
-# comes up unpowered and the internal antenna still radiates,
-# just badly — nothing looks broken, the range is quietly
-# worse than it should be. The Arduino core has done this for
-# you since 3.0.4; esp-idf does not, so this file has to.
-#
-# ============================================================
-
-output:
-  - platform: gpio
-    id: rf_switch_power
-    pin: GPIO3
-
-  - platform: gpio
-    id: antenna_select
-    pin: GPIO14
-
-# ============================================================
-# GLOBALS
-#
-# Air quality / LED state:
-#
-#   -2   SEN6x not responding         ->  Flashing white
-#   -1   Waiting for first readings   ->  LED off
-#    0   Good                         ->  Solid green
-#    1   Elevated                     ->  Solid amber
-#    2   Poor                         ->  Solid red
-#    3   Very poor / ventilate        ->  Flashing red
-# ============================================================
-
-globals:
-  - id: air_quality_led_state
-    type: int
-    restore_value: no
-    initial_value: '-1'
-
-  # millis() of the last SEN6x reading, 0 = none yet
-  - id: sen6x_last_update
-    type: uint32_t
-    restore_value: no
-    initial_value: '0'
-
-  # Temperature ring for the rate of change. Zero-initialised;
-  # temp_hist_count gates reads until it is full.
-  - id: temp_hist
-    type: float[${temp_rate_window}]
-    restore_value: no
-  - id: temp_hist_idx
-    type: uint8_t
-    restore_value: no
-    initial_value: '0'
-  - id: temp_hist_count
-    type: uint8_t
-    restore_value: no
-    initial_value: '0'
-
-  # Open-window latch. Not restored: after a reboot the safe
-  # assumption is shut, and the next fall will re-latch it.
-  - id: window_latched
-    type: bool
-    restore_value: no
-    initial_value: 'false'
-
-  # Consecutive rate samples agreeing with each edge
-  - id: window_open_run
-    type: uint8_t
-    restore_value: no
-    initial_value: '0'
-  - id: window_close_run
-    type: uint8_t
-    restore_value: no
-    initial_value: '0'
-
-  # millis() when the latch closed, for the max-hold valve
-  - id: window_latched_at
-    type: uint32_t
-    restore_value: no
-    initial_value: '0'
-
-  # millis() of the last sample that armed the lockout, from
-  # either bright light or a heat spike. 0 = never armed,
-  # which must not read as "just now".
-  - id: last_heat_at
-    type: uint32_t
-    restore_value: no
-    initial_value: '0'
-  - id: sun_lockout_active
-    type: bool
-    restore_value: no
-    initial_value: 'false'
-
-  # Consecutive settled samples counting toward release
-  - id: window_settle_run
-    type: uint8_t
-    restore_value: no
-    initial_value: '0'
-
-  # Automated VOC saves since boot. The save interval below
-  # bumps it, so HA history shows each save at its exact time.
-  # The first one lands one save interval after boot.
-  - id: voc_save_count
-    type: uint32_t
-    restore_value: no
-    initial_value: '0'
-
-# ============================================================
-# SENSORS
-# ============================================================
-
-sensor:
-
-  # ----------------------------------------------------------
-  # VEML7700  —  ambient light
-  # ----------------------------------------------------------
-  - platform: veml7700
-    address: 0x10
-    update_interval: ${lux_sample_interval}
-    auto_mode: true
-    lux_compensation: true
-    ambient_light:
-      id: veml7700_illuminance
-      name: "Illuminance"
-      accuracy_decimals: 0
-      # Throttle FIRST: the other order lets delta accept a
-      # change and move its baseline, then throttle drops the
-      # value — leaving HA stale until the next heartbeat.
-      filters: &lux_publish
-        - throttle: ${lux_publish_min_gap}
-        - or:
-            - delta: ${lux_publish_delta}
-            - heartbeat: ${lux_publish_heartbeat}
-    full_spectrum:
-      id: veml7700_full_spectrum
-      name: "Full Spectrum"
-      accuracy_decimals: 0
-      filters: *lux_publish
-    actual_gain:
-      name: "VEML - Actual Gain"
-      entity_category: diagnostic
-      disabled_by_default: true
-      filters:
-        - throttle: ${diag_interval}
-    actual_integration_time:
-      name: "VEML - Integration Time"
-      entity_category: diagnostic
-      disabled_by_default: true
-      filters:
-        - throttle: ${diag_interval}
-
-  # ----------------------------------------------------------
-  # SEN6x  —  air quality
-  # ----------------------------------------------------------
-  - platform: sen6x
-    id: sen6x_dev
-    address: 0x6B
-    # Optional — inferred from the product name when absent.
-    # See SENSOR MODEL at the top of the file.
-    type: ${sen_model}
-    update_interval: ${sen6x_sample_interval}
-    # Hand the saved baseline back during setup, while the
-    # sensor is still idle and before the measurement starts —
-    # the only window in which it is accepted, and it applies
-    # once. No-op until a save has actually run.
-    restore_voc_state_on_boot: true
-    pm_1_0:
-      id: sen6x_pm1
-      name: "PM1"
-    pm_2_5:
-      id: sen6x_pm25
-      name: "PM2.5"
-    pm_4_0:
-      id: sen6x_pm4
-      name: "PM4"
-    pm_10_0:
-      id: sen6x_pm10
-      name: "PM10"
-    temperature:
-      id: sen6x_temperature
-      name: "Temperature"
-      accuracy_decimals: 2
-      # WATCHDOG. Temperature is the one channel every SEN6x
-      # part publishes, so liveness does not depend on which
-      # sensor is fitted.
-      #
-      # Raw = before filters, so it asks "did the hardware
-      # answer?" rather than "was the answer any good". A
-      # filter added here later cannot starve it into a false
-      # fault, and an RH&T fault — which publishes NAN — still
-      # counts as an answer, because that is what SEN - Error -
-      # RH&T is for.
-      on_raw_value:
-        - lambda: 'id(sen6x_last_update) = millis();'
-    temperature_compensation:
-      offset: ${sen6x_temp_offset}
-    humidity:
-      id: sen6x_humidity
-      name: "Humidity"
-    voc_index:
-      id: sen6x_voc
-      name: "VOC Index"
-      # Tuned per room — see VOC ALGORITHM TUNING at the top.
-      algorithm_tuning:
-        gating_max_duration_minutes: ${voc_gating_max_duration_minutes}
-        learning_time_offset_hours: ${voc_learning_time_offset_hours}
-        learning_time_gain_hours: ${voc_learning_time_gain_hours}
-    nox_index:
-      id: sen6x_nox
-      name: "NOx Index"
-      # The recompute hook, on the last channel that exists on
-      # every part this file targets. The component publishes
-      # in a fixed order — PM, temp, RH, VOC, NOx, HCHO, CO2 —
-      # so on a SEN65 this sees a complete fresh set, and on a
-      # SEN66 everything but CO2, which is one poll behind.
-      # That costs one sample interval of latency on the CO2
-      # tier alone; the 30s LED self-heal picks up the rest.
-      #
-      # The status register is read at the top of this same
-      # poll cycle, so the flags behind SEN - Error are fresh
-      # either way.
-      on_value:
-        - component.update: air_quality_level
-        - component.update: sen6x_error_text
-    # MODEL: SEN66 only. Comment out for a SEN65 and set
-    # co2_state: "-1" at the top of the file.
-    # co2:
-    #   id: sen6x_co2
-    #   name: "CO2"
-
-  # ----------------------------------------------------------
-  # AIR QUALITY LEVEL
-  #
-  # Worst-of across all seven channels, four tiers each.
-  # Thresholds live in substitutions at the top of the file.
-  # ----------------------------------------------------------
-  - platform: template
-    id: air_quality_level
-    name: "Air Quality Level"
-    accuracy_decimals: 0
-    state_class: measurement
-    update_interval: never
-    lambda: |-
-      // -1 on a part with no CO2 channel; SENSOR MODEL, top
-      float co2  = ${co2_state};
-      float pm1  = id(sen6x_pm1).state;
-      float pm25 = id(sen6x_pm25).state;
-      float pm4  = id(sen6x_pm4).state;
-      float pm10 = id(sen6x_pm10).state;
-      float voc  = id(sen6x_voc).state;
-      float nox  = id(sen6x_nox).state;
-
-      // Hold off until every channel this part has is valid.
-      if (
-          isnan(co2)  ||
-          isnan(pm1)  ||
-          isnan(pm25) ||
-          isnan(pm4)  ||
-          isnan(pm10) ||
-          isnan(voc)  ||
-          isnan(nox)
-      ) {
-        return NAN;
-      }
-
-      // below t1 = 0, t1..t2 = 1, t2..t3 = 2, >= t3 = 3
-      auto tier = [](float v, float t1, float t2, float t3) -> int {
-        if (v >= t3) return 3;
-        if (v >= t2) return 2;
-        if (v >= t1) return 1;
-        return 0;
-      };
-
-      int worst = 0;
-      worst = std::max(worst, tier(co2,  ${co2_l1},  ${co2_l2},  ${co2_l3}));
-      worst = std::max(worst, tier(pm1,  ${pm25_l1}, ${pm25_l2}, ${pm25_l3}));
-      worst = std::max(worst, tier(pm25, ${pm25_l1}, ${pm25_l2}, ${pm25_l3}));
-      worst = std::max(worst, tier(pm4,  ${pm10_l1}, ${pm10_l2}, ${pm10_l3}));
-      worst = std::max(worst, tier(pm10, ${pm10_l1}, ${pm10_l2}, ${pm10_l3}));
-      worst = std::max(worst, tier(voc,  ${voc_l1},  ${voc_l2},  ${voc_l3}));
-      worst = std::max(worst, tier(nox,  ${nox_l1},  ${nox_l2},  ${nox_l3}));
-      return worst;
-    on_value:
-      then:
-        - lambda: |-
-            int new_state = isnan(x) ? -1 : (int) x;
-            if (new_state != id(air_quality_led_state)) {
-              id(air_quality_led_state) = new_state;
-              id(update_status_led).execute();
-            }
-
-  # ----------------------------------------------------------
-  # TEMPERATURE RATE OF CHANGE
-  #
-  # degC/min, so it reads the same whatever the interval is.
-  # Negative = cooling. Measured across the whole ring rather
-  # than between consecutive samples — a single-sample
-  # difference is mostly noise. NAN until the ring fills, so HA
-  # shows unknown rather than a fabricated zero after boot.
-  #
-  # entity_category: ESPHome only allows '' or 'diagnostic' on
-  # a sensor; 'config' is rejected. Diagnostic is the nearest
-  # bucket that keeps it out of the main reading list.
-  # ----------------------------------------------------------
-  - platform: template
-    id: temperature_rate
-    name: "Window - Temperature Rate"
-    unit_of_measurement: "°C/min"
-    icon: mdi:thermometer-chevron-down
-    accuracy_decimals: 3
-    state_class: measurement
-    entity_category: diagnostic
-    update_interval: ${temp_rate_interval_s}s
-    lambda: |-
-      const uint8_t n = ${temp_rate_window};
-      float t = id(sen6x_temperature).state;
-      if (isnan(t)) {
-        return NAN;
-      }
-
-      // Read the slot before overwriting it: it holds the
-      // sample from a full lap of the ring ago.
-      float oldest = id(temp_hist)[id(temp_hist_idx)];
-      uint8_t count = id(temp_hist_count);
-      id(temp_hist)[id(temp_hist_idx)] = t;
-      id(temp_hist_idx) = (id(temp_hist_idx) + 1) % n;
-      if (count < n) {
-        id(temp_hist_count) = count + 1;
-        return NAN;
-      }
-
-      const float span_min = (n * ${temp_rate_interval_s}) / 60.0f;
-      return (t - oldest) / span_min;
-
-    # The open-window latch, driven off each new rate. Only one
-    # edge is armed at a time, so the two runs never fight.
-    on_value:
-      then:
-        - lambda: |-
-            if (isnan(x)) {
-              return;
-            }
-
-            // Live thresholds from HA. All NAN for the first
-            // moments after boot, before the restore lands.
-            const float open_rate = id(window_open_threshold).state;
-            const float close_rate = id(window_close_threshold).state;
-            const float hold_min = id(window_max_hold).state;
-            const float lockout_lux = id(sun_lockout_lux).state;
-            const float lockout_min = id(sun_lockout_minutes).state;
-            const float spike_rate = id(heat_spike_threshold).state;
-            if (isnan(open_rate) || isnan(close_rate) || isnan(hold_min) ||
-                isnan(lockout_lux) || isnan(lockout_min) || isnan(spike_rate)) {
-              return;
-            }
-
-            // "Settled" reuses close_rate — already this file's
-            // smallest rate that counts as real movement — and
-            // is clamped to half the open threshold so a large
-            // close_rate can never widen the band enough to
-            // release the lockout while the board is still
-            // cooling hard enough to trip detection.
-            const float settle_rate = fminf(close_rate, fabsf(open_rate) * 0.5f);
-
-            const uint32_t now = millis();
-            // Full spectrum, not illuminance: what heats
-            // the board is radiant energy, and ALS throws away
-            // the near-IR that carries much of it.
-            const float lux = id(veml7700_full_spectrum).get_raw_state();
-            const bool bright = !isnan(lux) && lux >= lockout_lux;
-
-            // Arm on light on the board, or on warming faster
-            // than any room recovery manages. The second is
-            // still what catches a thermal source: a radiator
-            // emits far past the VEML's ~1 um cutoff and is
-            // invisible on either channel.
-            // Sampled at this cadence, so a flash shorter than
-            // one interval can be missed.
-            const bool arming = bright || (x >= spike_rate);
-
-            if (arming) {
-              id(sun_lockout_active) = true;
-              id(last_heat_at) = now;
-              id(window_settle_run) = 0;
-            } else if (id(sun_lockout_active)) {
-              // Release on evidence, not a timer: the board has
-              // stopped shedding heat once the rate is back in
-              // the background band and stays there.
-              const bool settled = fabsf(x) <= settle_rate;
-              id(window_settle_run) = settled ? id(window_settle_run) + 1 : 0;
-
-              // Ceiling on a slow settle. While the light is
-              // still above threshold the lockout is refreshed
-              // every sample and this never runs — correct, the
-              // board really is being heated. All-day lockout
-              // means the lux threshold is too low.
-              const bool ceiling =
-                  (now - id(last_heat_at)) > (uint32_t) (lockout_min * 60000.0f);
-              if (id(window_settle_run) >= ${window_settle_samples} || ceiling) {
-                id(sun_lockout_active) = false;
-                id(window_settle_run) = 0;
-              }
-            }
-            const bool locked_out = id(sun_lockout_active);
-
-            if (!id(window_latched)) {
-              // Suppress only the open edge: sun heating the
-              // board fakes an opening, never a closing.
-              if (locked_out) {
-                id(window_open_run) = 0;
-                return;
-              }
-              id(window_open_run) = (x <= open_rate) ? id(window_open_run) + 1 : 0;
-              if (id(window_open_run) >= ${window_open_samples}) {
-                id(window_latched) = true;
-                id(window_latched_at) = now;
-                id(window_open_run) = 0;
-                id(window_close_run) = 0;
-              }
-            } else {
-              id(window_close_run) = (x >= close_rate) ? id(window_close_run) + 1 : 0;
-
-              // Safety valve: a room that never warms back up
-              // would otherwise stay latched until a reboot.
-              const bool held_too_long =
-                  (now - id(window_latched_at)) > (uint32_t) (hold_min * 60000.0f);
-              if (id(window_close_run) >= ${window_close_samples} || held_too_long) {
-                id(window_latched) = false;
-                id(window_open_run) = 0;
-                id(window_close_run) = 0;
-              }
-            }
-
-  # ----------------------------------------------------------
-  # DIAGNOSTICS
-  # ----------------------------------------------------------
-  - platform: internal_temperature
-    name: "ESP - Temperature"
-    entity_category: diagnostic
-    update_interval: ${diag_interval}
-
-  - platform: wifi_signal
-    name: "ESP - WiFi Signal"
-    entity_category: diagnostic
-    update_interval: ${diag_interval}
-
-  # Seconds since boot. Resets on a reboot; keeps climbing
-  # through an API reconnect, which is how the two are told
-  # apart in HA history.
-  - platform: uptime
-    name: "ESP - Uptime"
-    entity_category: diagnostic
-    update_interval: ${diag_interval}
-
-  # ----------------------------------------------------------
-  # VOC SAVES  —  one step per automated baseline save
-  #
-  # Counts the interval trigger, not the button or OTA save.
-  # update_interval: never — published from the interval, so a
-  # step in HA history is a save, timestamped. Drops back to
-  # zero on a reboot, which HA reads as a reset.
-  # ----------------------------------------------------------
-  - platform: template
-    id: voc_save_counter
-    name: "SEN - VOC Saves"
-    icon: mdi:content-save-cog
-    entity_category: diagnostic
-    accuracy_decimals: 0
-    state_class: total_increasing
-    update_interval: never
-    lambda: 'return id(voc_save_count);'
-
-# ============================================================
-# BUTTONS
-#
-# Restart no longer costs the VOC baseline. setup() still opens
-# with a device reset, but the saved state is handed back
-# before the measurement starts, so learning resumes where it
-# left off. NOx has no equivalent command and does still start
-# from scratch on every boot.
-#
-# Both platforms default to entity_category: config; diagnostic
-# here to keep them with the other device controls in HA.
-# ============================================================
-
-button:
-  - platform: restart
-    name: "ESP - Restart"
-    entity_category: diagnostic
-
-  # ----------------------------------------------------------
-  # VOC BASELINE
-  #
-  #   Save     read the state now and write it to flash
-  #   Restore  hand the stored state back and resume from it
-  #   Reset    wipe the engine and the stored copy
-  #
-  # Save runs during measurement and costs nothing visible.
-  #
-  # Restore and Reset both have to stop the measurement — the
-  # sensor takes a state, and a device reset, in idle mode only
-  # — so both re-arm the 60s startup delay. Expect SEN - Error
-  # to read "Not responding" and the LED to flash white for the
-  # tail of it, the same as a fan clean.
-  #
-  # Reset is the only way to restart VOC learning short of a
-  # power cycle: the state survives a stop/start, so nothing
-  # below a device reset clears it. It drops the stored copy
-  # too, otherwise the next boot would restore the baseline you
-  # just threw away.
-  # ----------------------------------------------------------
-  - platform: sen6x
-    sen6x_id: sen6x_dev
-    save_voc_state:
-      name: "SEN - VOC Baseline Save"
-      entity_category: diagnostic
-    restore_voc_state:
-      name: "SEN - VOC Baseline Restore"
-      entity_category: diagnostic
-    reset_voc_algorithm:
-      name: "SEN - VOC Baseline Reset"
-      entity_category: diagnostic
-
-# ============================================================
-# BINARY SENSORS
-# ============================================================
-
-binary_sensor:
-
-  # ----------------------------------------------------------
-  # ROOM IS LIT  —  full spectrum above the dark room threshold
-  #
-  # The lambda re-evaluates every loop but on_state fires only
-  # when the answer flips, which is what pokes the LED.
-  #
-  # Full spectrum rather than illuminance: the WHITE channel
-  # carries near-IR as well, so it separates a dark room from a
-  # dimly lit one more decisively than the eye-weighted ALS
-  # curve does. The sun lockout reads the same channel, against
-  # its own threshold.
-  #
-  # One asymmetry worth knowing: auto-gain is driven by the ALS
-  # counts alone, so under a strongly IR-weighted source WHITE
-  # can clip at full scale while ALS is still comfortably in
-  # range. That reads as "lit", which is the harmless direction.
-  #
-  # get_raw_state() is the unfiltered sample, so the LED
-  # follows the room at the sampling rate, not the publish rate
-  # of the Full Spectrum entity.
-  # ----------------------------------------------------------
-  - platform: template
-    id: room_is_lit
-    name: "Room Is Lit"
-    icon: mdi:brightness-6
-    device_class: light
-    lambda: |-
-      float lux = id(veml7700_full_spectrum).get_raw_state();
-      float t   = id(ambient_light_threshold).state;
-
-      // No reading yet, or a dead lux sensor -> report lit, so
-      // the LED keeps working rather than going dark forever.
-      if (isnan(lux) || isnan(t)) {
-        return true;
-      }
-      return lux >= t;
-    on_state:
-      then:
-        - script.execute: update_status_led
-
-  # ----------------------------------------------------------
-  # SEN - SENSOR ACTIVE  —  the SEN6x watchdog
-  #
-  # air_quality_level only recomputes when a NOx reading lands,
-  # so a dead sensor would otherwise leave the last colour
-  # showing — a green "all good" from a sensor that stopped
-  # answering. Going off sets the LED to flashing white; the
-  # next real reading restores the colour via air_quality_level.
-  #
-  # Unsigned subtraction handles the 49-day millis() wrap.
-  # last_update starts at 0, which also covers "the sensor
-  # never came up at all" once the timeout has passed.
-  #
-  # internal: true — nothing in HA needs it now that SEN - Error
-  # says "Not responding" and the consolidated flag folds it in,
-  # but it cannot simply be deleted: it drives the LED on its
-  # falling edge, pushes SEN - Error when a dead sensor produces
-  # no CO2 value to push from, and is the first thing both error
-  # entities ask. Internal keeps all of that and only stops it
-  # being published.
-  # ----------------------------------------------------------
-  - platform: template
-    id: sen6x_active
-    name: "SEN - Sensor Active"
-    icon: mdi:access-point-check
-    device_class: connectivity
-    entity_category: diagnostic
-    internal: true
-    lambda: |-
-      return (millis() - id(sen6x_last_update)) <= ${sen6x_timeout_ms};
-    on_state:
-      then:
-        - lambda: |-
-            if (!x && id(air_quality_led_state) != -2) {
-              id(air_quality_led_state) = -2;
-              id(update_status_led).execute();
-            }
-        # Leaving -2 was previously a side effect of the next
-        # air_quality_level publish happening to differ. Nothing
-        # cleared the fault, so a missed edge anywhere in that
-        # chain left the LED flashing white with every entity
-        # reading OK. Re-derive the level here instead: its
-        # on_value sets the state and repaints the LED.
-        - if:
-            condition:
-              lambda: 'return x && id(air_quality_led_state) == -2;'
-            then:
-              - component.update: air_quality_level
-        # A sensor that stopped answering will not produce the
-        # CO2 value that pushes the text, so push it from here
-        - component.update: sen6x_error_text
-
-  # ----------------------------------------------------------
-  # OPEN WINDOW DETECTED
-  #
-  # A latch, set and cleared by the two edges in the rate
-  # sensor above, so it holds through the flat middle of a long
-  # airing where the rate sits at zero.
-  #
-  # It reads the room's response, not the window, so:
-  #
-  #   - anything else that cools the room hard reads as open
-  #     (heating off, a door onto a cold hallway)
-  #   - heating coming on with the window still open reads as
-  #     shut
-  #   - a window onto air at room temperature is invisible,
-  #     which is most of summer
-  # ----------------------------------------------------------
-  - platform: template
-    id: window_open
-    name: "Open Window Detected"
-    device_class: window
-    icon: mdi:window-open-variant
-    lambda: 'return id(window_latched);'
-    on_state:
-      then:
-        - script.execute: update_status_led
-
-  # ----------------------------------------------------------
-  # SUN LOCKOUT ACTIVE
-  #
-  # Purely so you can see why an opening was not detected —
-  # without it the suppression is invisible and the lux
-  # threshold is untunable. Drop it once it's dialled in.
-  # ----------------------------------------------------------
-  - platform: template
-    id: sun_lockout
-    name: "Window - Sun Lockout Active"
-    icon: mdi:white-balance-sunny
-    entity_category: diagnostic
-    lambda: 'return id(sun_lockout_active);'
-
-  # ----------------------------------------------------------
-  # SEN6x DEVICE STATUS
-  #
-  # The status register is read *and cleared* at the start of
-  # every poll, so each flag answers "did this fault happen in
-  # the last ${sen6x_sample_interval}", not "is it happening
-  # now". A one-cycle blip is real and will show.
-  #
-  # internal: true on all of them — they exist for the two
-  # entities that read them (SEN - Error, SEN - Error -
-  # Consolidated) and would otherwise be a row of near-permanent
-  # OKs in HA. Internal entities keep their state and their id,
-  # they are simply not published, so nothing below changes.
-  #
-  # hcho_error is deliberately absent: neither the SEN65 nor the
-  # SEN66 has a formaldehyde channel, so configuring it would
-  # only earn an error at boot and a sensor that never updates.
-  # co2_error is the same story on a SEN65, hence the MODEL tag.
-  # ----------------------------------------------------------
-  - platform: sen6x
-    sen6x_id: sen6x_dev
-    fan_error:
-      id: sen6x_fan_error
-      name: "SEN - Error - Fan"
-      internal: true
-    fan_speed_warning:
-      id: sen6x_fan_speed_warning
-      name: "SEN - Error - Fan Speed"
-      internal: true
-    rht_error:
-      id: sen6x_rht_error
-      name: "SEN - Error - RH&T"
-      internal: true
-    gas_error:
-      id: sen6x_gas_error
-      name: "SEN - Error - Gas"
-      internal: true
-    # MODEL: SEN66 only. Comment out for a SEN65 and set
-    # co2_fault: "false" at the top of the file.
-    # co2_error:
-    #   id: sen6x_co2_error
-    #   name: "SEN - Error - CO2"
-    #   internal: true
-    pm_error:
-      id: sen6x_pm_error
-      name: "SEN - Error - PM"
-      internal: true
-
-  # ----------------------------------------------------------
-  # SEN6x CONSOLIDATED ERROR
-  #
-  # One entity to watch instead of seven: the six self-reported
-  # faults plus the watchdog. A sensor that has stopped
-  # answering the bus keeps its last flags and would read OK on
-  # those six alone, so the (now internal) watchdog is folded in
-  # here — and it is knowable before any status read lands,
-  # hence the order.
-  # Otherwise unknown until the first status read, so a fresh
-  # boot doesn't claim "no fault" before it has looked.
-  # ----------------------------------------------------------
-  - platform: template
-    id: sen6x_any_error
-    name: "SEN - Error - Consolidated"
-    icon: mdi:alert-circle-outline
-    device_class: problem
-    entity_category: diagnostic
-    lambda: |-
-      if (id(sen6x_active).has_state() && !id(sen6x_active).state) {
-        return true;
-      }
-
-      // Nothing published yet -> report unknown rather than OK
-      if (!id(sen6x_fan_error).has_state()) {
-        return {};
-      }
-
-      return id(sen6x_fan_error).state ||
-             id(sen6x_fan_speed_warning).state ||
-             id(sen6x_rht_error).state ||
-             id(sen6x_gas_error).state ||
-             ${co2_fault} ||
-             id(sen6x_pm_error).state;
-
-  # ----------------------------------------------------------
-  # VOC BASELINE STORED
-  #
-  # True once a baseline is in flash and available to restore.
-  # Flips on the first successful Save, comes up true at boot
-  # when a stored state is found, and goes false again after a
-  # Reset clears it.
-  #
-  # Confirmation that survives the log level: no log line has
-  # to be caught in the moment, and it is the honest signal
-  # anyway — it is set from the same flag the restore path
-  # reads, so a false here means a restore would find nothing.
-  # ----------------------------------------------------------
-  - platform: template
-    id: sen6x_voc_state_stored
-    name: "SEN - VOC Baseline Stored"
-    icon: mdi:content-save-check
-    entity_category: diagnostic
-    lambda: 'return id(sen6x_dev).has_voc_state();'
-
-# ============================================================
-# TEXT SENSORS
-# ============================================================
-
-text_sensor:
-
-  # ----------------------------------------------------------
-  # SEN - ERROR  —  which faults, in words
-  #
-  # The six device-status flags as one line: "OK", or the
-  # active faults joined, e.g. "Fan, Gas". The consolidated
-  # binary sensor stays as the thing automations watch — this
-  # one says which, so a problem alert can name it.
-  #
-  # Same read-and-clear caveat as the flags: each line covers
-  # the last ${sen6x_sample_interval}, not right now, so a
-  # one-cycle blip shows and then clears on the next update.
-  #
-  # update_interval: never — pushed from the two places that
-  # can change the answer (a fresh status read, which lands
-  # just before the CO2 value, and the watchdog flipping),
-  # rather than republishing the same string every cycle.
-  # ----------------------------------------------------------
-  - platform: template
-    id: sen6x_error_text
-    name: "SEN - Error"
-    icon: mdi:alert-circle-outline
-    entity_category: diagnostic
-    update_interval: never
-    lambda: |-
-      // Ordered like the consolidated flag: a sensor that has
-      // stopped answering keeps its last flags, so the
-      // watchdog has to be asked first.
-      if (id(sen6x_active).has_state() && !id(sen6x_active).state) {
-        return std::string("Not responding");
-      }
-      if (!id(sen6x_fan_error).has_state()) {
-        return std::string("Waiting for status");
-      }
-
-      std::string faults;
-      auto add = [&faults](const char *name) {
-        if (!faults.empty()) {
-          faults += ", ";
-        }
-        faults += name;
-      };
-
-      if (id(sen6x_fan_error).state)         add("Fan");
-      if (id(sen6x_fan_speed_warning).state) add("Fan speed");
-      if (id(sen6x_rht_error).state)         add("RH&T");
-      if (id(sen6x_gas_error).state)         add("Gas");
-      if (${co2_fault})                      add("CO2");
-      if (id(sen6x_pm_error).state)          add("PM");
-
-      return faults.empty() ? std::string("OK") : faults;
-
-# ============================================================
-# NUMBERS  —  live configuration from HA
-# ============================================================
-
-number:
-
-  # ----------------------------------------------------------
-  # AMBIENT LIGHT THRESHOLD
-  #
-  # Full spectrum at or above this = "room is lit". Still lx,
-  # but the WHITE channel — see the VEML7700 block at the top
-  # for how that scale differs from Illuminance.
-  # ----------------------------------------------------------
-  - platform: template
-    id: ambient_light_threshold
-    name: "LED - Ambient Light Threshold"
-    icon: mdi:brightness-6
-    entity_category: config
-    unit_of_measurement: lx
-    min_value: 0
-    max_value: 1000
-    step: 1
-    initial_value: ${dark_room_threshold_default}
-    restore_value: true
-    optimistic: true
-    mode: box
-
-  # ----------------------------------------------------------
-  # WINDOW DETECTION THRESHOLDS
-  #
-  # Live, so you can watch Window - Temperature Rate through a real
-  # airing and set these against what the room actually does.
-  #
-  # Open is negative (cooling), close positive (recovering).
-  # Neither can be zero, where the detector would trip on its
-  # own noise and never come out of it.
-  # ----------------------------------------------------------
-  - platform: template
-    id: window_open_threshold
-    name: "Window - Open Rate"
-    icon: mdi:thermometer-chevron-down
-    entity_category: config
-    unit_of_measurement: "°C/min"
-    min_value: -1.0
-    max_value: -0.01
-    step: 0.01
-    initial_value: ${window_open_rate_default}
-    restore_value: true
-    optimistic: true
-    mode: box
-
-  - platform: template
-    id: window_close_threshold
-    name: "Window - Close Rate"
-    icon: mdi:thermometer-chevron-up
-    entity_category: config
-    unit_of_measurement: "°C/min"
-    min_value: 0.01
-    max_value: 0.5
-    step: 0.01
-    initial_value: ${window_close_rate_default}
-    restore_value: true
-    optimistic: true
-    mode: box
-
-  # Safety valve, not part of the model: how long the latch may
-  # stay set with no recovery before it gives up.
-  - platform: template
-    id: window_max_hold
-    name: "Window - Max Hold"
-    icon: mdi:timer-sand
-    entity_category: config
-    unit_of_measurement: min
-    min_value: 5
-    max_value: 360
-    step: 5
-    initial_value: ${window_max_hold_default_min}
-    restore_value: true
-    optimistic: true
-    mode: box
-
-  # ----------------------------------------------------------
-  # SUN LOCKOUT  (see the block at the top of the file)
-  #
-  # Compared against Full Spectrum, not Illuminance, whatever
-  # the name says — the name is kept so the entity and its
-  # stored value survive.
-  # ----------------------------------------------------------
-  - platform: template
-    id: sun_lockout_lux
-    name: "Window - Sun Lockout Illuminance"
-    icon: mdi:white-balance-sunny
-    entity_category: config
-    unit_of_measurement: lx
-    min_value: 100
-    max_value: 20000
-    step: 100
-    initial_value: ${sun_lockout_lux_default}
-    restore_value: true
-    optimistic: true
-    mode: box
-
-  - platform: template
-    id: heat_spike_threshold
-    name: "Window - Heat Spike Rate"
-    icon: mdi:thermometer-chevron-up
-    entity_category: config
-    unit_of_measurement: "°C/min"
-    min_value: 0.05
-    max_value: 1.0
-    step: 0.01
-    initial_value: ${heat_spike_rate_default}
-    restore_value: true
-    optimistic: true
-    mode: box
-
-  - platform: template
-    id: sun_lockout_minutes
-    name: "Window - Sun Lockout Time"
-    icon: mdi:timer-sand
-    entity_category: config
-    unit_of_measurement: min
-    min_value: 0
-    max_value: 120
-    step: 1
-    initial_value: ${sun_lockout_minutes_default}
-    restore_value: true
-    optimistic: true
-    mode: box
-
-# ============================================================
-# SWITCHES
-#
-# One YAML key, so the maintenance switch shares it with the
-# LED modes; its diagnostic entity_category is what puts it
-# with the status flags in HA.
-#
-#   SEN - Fan Clean               run a fan cleaning cycle
-#   LED - Night Mode              manual "LED always off"
-#   LED - Ambient Light Control   LED only when the room is lit
-#
-# Night Mode wins if both LED switches are on.
-# ============================================================
-
-switch:
-
-  # ----------------------------------------------------------
-  # FAN CLEAN
-  #
-  # Spins the fan flat out to clear dust off the optics;
-  # Sensirion suggest weekly-ish, or whenever PM readings
-  # drift. Turned on by hand; fan_clean_cycle turns it back off
-  # when the sequence finishes, so it reads as "cleaning" for
-  # the ~13s the sensor is out of service.
-  #
-  # ALWAYS_OFF: a maintenance trigger must never come back on
-  # by itself after a reboot. Switching it off by hand does not
-  # abort — the cycle has to reach start_measurement or the
-  # SEN6x would sit idle until the next reboot.
-  # ----------------------------------------------------------
-  - platform: template
-    name: "SEN - Fan Clean"
-    id: fan_clean
-    icon: mdi:fan
-    entity_category: diagnostic
-    optimistic: true
-    restore_mode: ALWAYS_OFF
-    on_turn_on:
-      then:
-        - script.execute: fan_clean_cycle
-
-  - platform: template
-    name: "LED - Night Mode"
-    id: night_mode
-    icon: mdi:weather-night
-    optimistic: true
-    restore_mode: RESTORE_DEFAULT_OFF
-    on_turn_on:
-      then:
-        # turn_off also clears any running effect
-        - light.turn_off:
-            id: status_led
-    on_turn_off:
-      then:
-        - script.execute: update_status_led
-
-  - platform: template
-    name: "LED - Ambient Light Control"
-    id: ambient_light_led_control
-    icon: mdi:brightness-auto
-    entity_category: config
-    optimistic: true
-    restore_mode: RESTORE_DEFAULT_ON
-    on_turn_on:
-      then:
-        - script.execute: update_status_led
-    on_turn_off:
-      then:
-        - script.execute: update_status_led
-
-# ============================================================
-# STATUS LED  —  single SK6812 RGBW NeoPixel
-#
-# Exposed to HA. update_status_led owns the colour but only
-# runs on events — air quality level, the watchdog,
-# room_is_lit, window_open, the LED switches, boot — so
-# anything driving the light by hand keeps showing until the
-# next one fires. Night Mode is the clean way to force it off.
-# ============================================================
-
-light:
-  - platform: esp32_rmt_led_strip
-    id: status_led
-    name: "LED - Status"
-    entity_category: diagnostic
-    pin: ${pin_status_led}
-    num_leds: 1
-    # GRBW addressable is SK6812 RGBW in almost all cases, and
-    # SK6812 timings match its datasheet. WS2812 timing drives
-    # T1H at 1000ns against the SK6812's 600 +/- 150ns spec —
-    # tolerated in practice but out of spec. Switch back to
-    # WS2812 if the LED misbehaves.
-    chipset: SK6812
-    channel_colors: GRBW
-    restore_mode: ALWAYS_OFF
-    default_transition_length: 0s
-    gamma_correct: 1.0
-
-    # The flashing/breathing states. Solid colours are set
-    # directly by update_status_led — strobe needs >= 2 colours,
-    # so a steady colour cannot be expressed as an effect.
-    effects:
-      - strobe:
-          name: "Ventilate"
-          colors:
-            - state: true
-              red: 100%
-              green: 0%
-              blue: 0%
-              white: 0%
-              brightness: ${led_brightness}
-              duration: ${led_flash_on}
-            - state: false
-              duration: ${led_flash_off}
-
-      - strobe:
-          name: "Sensor Fault"
-          colors:
-            # Dedicated W channel, not R+G+B
-            - state: true
-              red: 0%
-              green: 0%
-              blue: 0%
-              white: 100%
-              brightness: ${led_brightness}
-              duration: ${led_flash_on}
-            - state: false
-              duration: ${led_flash_off}
-
-      # ------------------------------------------------------
-      # OPEN WINDOW  —  the air quality colour, breathing
-      #
-      # Built as strobes rather than the pulse effect because
-      # pulse only modulates brightness and leaves whatever
-      # colour was last set; a strobe step carries its own
-      # colour, so each level is self-contained.
-      #
-      # A breath is two steps, up and down, each with a long
-      # transition. state: false fades to zero brightness
-      # rather than turning the light off, which would stop
-      # the effect.
-      # ------------------------------------------------------
-      - strobe:
-          name: "Window Good"
-          colors:
-            - state: true
-              red: 0%
-              green: 100%
-              blue: 0%
-              white: 0%
-              brightness: ${led_brightness}
-              duration: ${led_breathe_step}
-              transition_length: ${led_breathe_fade}
-            - state: false
-              duration: ${led_breathe_step}
-              transition_length: ${led_breathe_fade}
-
-      - strobe:
-          name: "Window Elevated"
-          colors:
-            - state: true
-              red: 100%
-              green: 45%
-              blue: 0%
-              white: 0%
-              brightness: ${led_brightness}
-              duration: ${led_breathe_step}
-              transition_length: ${led_breathe_fade}
-            - state: false
-              duration: ${led_breathe_step}
-              transition_length: ${led_breathe_fade}
-
-      - strobe:
-          name: "Window Poor"
-          colors:
-            - state: true
-              red: 100%
-              green: 0%
-              blue: 0%
-              white: 0%
-              brightness: ${led_brightness}
-              duration: ${led_breathe_step}
-              transition_length: ${led_breathe_fade}
-            - state: false
-              duration: ${led_breathe_step}
-              transition_length: ${led_breathe_fade}
-
-      # Level 3 with a window open: the strobe loops, so one
-      # breath plus two flashes gives breathe/blink/breathe.
-      - strobe:
-          name: "Window Ventilate"
-          colors:
-            - state: true
-              red: 100%
-              green: 0%
-              blue: 0%
-              white: 0%
-              brightness: ${led_brightness}
-              duration: ${led_breathe_step}
-              transition_length: ${led_breathe_fade}
-            - state: false
-              duration: ${led_breathe_step}
-              transition_length: ${led_breathe_fade}
-            - state: true
-              red: 100%
-              green: 0%
-              blue: 0%
-              white: 0%
-              brightness: ${led_brightness}
-              duration: ${led_flash_on}
-            - state: false
-              duration: ${led_flash_off}
-            - state: true
-              red: 100%
-              green: 0%
-              blue: 0%
-              white: 0%
-              brightness: ${led_brightness}
-              duration: ${led_flash_on}
-            - state: false
-              duration: ${led_flash_off}
-
-# ============================================================
-# INTERVALS
-#
-# The unplanned reboot the OTA trigger cannot cover: a power
-# cut, a brownout, a watchdog. Worst case the restored baseline
-# is one interval stale, which still beats re-anchoring from
-# nothing.
-#
-# A save landing mid fan-clean is queued rather than refused —
-# the component holds it until the bus is free — so this needs
-# no coordination with the cycle below.
-# ============================================================
-
-interval:
-  - interval: ${voc_state_save_interval}
-    # Skips the tick that would otherwise fire seconds after
-    # boot, before the sensor has finished starting up, so the
-    # first save lands one interval in.
-    startup_delay: 5min
-    then:
-      - sen6x.save_voc_state: sen6x_dev
-      - lambda: 'id(voc_save_count) += 1;'
-      - component.update: voc_save_counter
-
-  # ----------------------------------------------------------
-  # LED SELF-HEAL
-  #
-  # Everything that paints the LED is edge-driven, so a single
-  # missed event leaves it showing something stale until the
-  # next one — and the fault state had no clearing edge at all.
-  # This re-derives the level from live readings, and its
-  # on_value repaints only when the answer differs, so a
-  # correct LED costs one lambda and no light call.
-  #
-  # Gated on the watchdog: while the SEN6x is not answering,
-  # the last readings are still sitting in the sensor objects
-  # and would recompute to a cheerful green. Not recomputing is
-  # what keeps the white flash honest.
-  #
-  # 30s is a compromise between a stale LED and pointless work;
-  # the recovery edge above handles the normal case instantly,
-  # so this only ever covers a bug.
-  # ----------------------------------------------------------
-  - interval: 30s
-    then:
-      - if:
-          condition:
-            binary_sensor.is_on: sen6x_active
-          then:
-            - component.update: air_quality_level
-
-# ============================================================
-# SCRIPTS
-# ============================================================
-
-script:
-
-  # ----------------------------------------------------------
-  # FAN CLEAN CYCLE
-  #
-  # The SEN6x only accepts fan cleaning in idle mode, so the
-  # measurement has to be stopped around it. Every command also
-  # opens a wait window during which the next is refused with
-  # "Device busy", so the delays are the datasheet times plus a
-  # margin:
-  #
-  #   stop_measurement     1.4s settle   ->  wait 2s
-  #   start_fan_cleaning   10s  cleaning ->  wait 11s
-  #   start_measurement    re-arms the 60s startup delay
-  #
-  # Nothing publishes for ~75s end to end, which outlasts
-  # sen6x_timeout_ms — expect SEN - Error to read "Not
-  # responding" and the LED to flash white for the tail of the
-  # warm-up.
-  #
-  # mode: single — re-arming the switch mid-cycle would land
-  # inside a wait window and be rejected anyway.
-  # ----------------------------------------------------------
-  - id: fan_clean_cycle
-    mode: single
-    then:
-      - sen6x.stop_measurement: sen6x_dev
-      - delay: 2s
-      - sen6x.start_fan_cleaning: sen6x_dev
-      - delay: 11s
-      - sen6x.start_measurement: sen6x_dev
-      # Release the switch: the sensor is measuring again, even
-      # though values stay held back for the startup delay.
-      - switch.turn_off: fan_clean
-
-  # ----------------------------------------------------------
-  # UPDATE STATUS LED
-  #
-  # Called from every input that can change what the LED should
-  # show: air quality level, the watchdog, room_is_lit,
-  # window_open, both switches, and boot.
-  #
-  # An open window makes the air quality colour breathe rather
-  # than sit solid — same colour, only the delivery changes. A
-  # sensor fault outranks it: if the readings can't be trusted
-  # there is nothing to breathe.
-  # ----------------------------------------------------------
-  - id: update_status_led
-    mode: restart
-    then:
-      - if:
-          condition:
-            or:
-              # Manual override
-              - switch.is_on: night_mode
-              # Room is dark and light-based control is on
-              - and:
-                  - switch.is_on: ambient_light_led_control
-                  - binary_sensor.is_off: room_is_lit
-          then:
-            - light.turn_off:
-                id: status_led
-          else:
-
-            # Waiting for first valid SEN6x data -> LED off
-            - if:
-                condition:
-                  lambda: 'return id(air_quality_led_state) == -1;'
-                then:
-                  - light.turn_off:
-                      id: status_led
-
-            # Level 0 -> GREEN, breathing green if a window is
-            # open. effect: "None" is required — turn_on alone
-            # would leave a previously started strobe running.
-            - if:
-                condition:
-                  lambda: 'return id(air_quality_led_state) == 0;'
-                then:
-                  - if:
-                      condition:
-                        binary_sensor.is_on: window_open
-                      then:
-                        - light.turn_on:
-                            id: status_led
-                            effect: "Window Good"
-                      else:
-                        - light.turn_on:
-                            id: status_led
-                            effect: "None"
-                            red: 0%
-                            green: 100%
-                            blue: 0%
-                            white: 0%
-                            brightness: ${led_brightness}
-
-            # Level 1 -> AMBER
-            - if:
-                condition:
-                  lambda: 'return id(air_quality_led_state) == 1;'
-                then:
-                  - if:
-                      condition:
-                        binary_sensor.is_on: window_open
-                      then:
-                        - light.turn_on:
-                            id: status_led
-                            effect: "Window Elevated"
-                      else:
-                        - light.turn_on:
-                            id: status_led
-                            effect: "None"
-                            red: 100%
-                            green: 45%
-                            blue: 0%
-                            white: 0%
-                            brightness: ${led_brightness}
-
-            # Level 2 -> RED
-            - if:
-                condition:
-                  lambda: 'return id(air_quality_led_state) == 2;'
-                then:
-                  - if:
-                      condition:
-                        binary_sensor.is_on: window_open
-                      then:
-                        - light.turn_on:
-                            id: status_led
-                            effect: "Window Poor"
-                      else:
-                        - light.turn_on:
-                            id: status_led
-                            effect: "None"
-                            red: 100%
-                            green: 0%
-                            blue: 0%
-                            white: 0%
-                            brightness: ${led_brightness}
-
-            # Level 3 -> FLASHING RED, or breathe/blink/breathe
-            # while a window is open.
-            - if:
-                condition:
-                  lambda: 'return id(air_quality_led_state) == 3;'
-                then:
-                  - if:
-                      condition:
-                        binary_sensor.is_on: window_open
-                      then:
-                        - light.turn_on:
-                            id: status_led
-                            effect: "Window Ventilate"
-                      else:
-                        - light.turn_on:
-                            id: status_led
-                            effect: "Ventilate"
-
-            # SEN6x fault -> FLASHING WHITE
-            - if:
-                condition:
-                  lambda: 'return id(air_quality_led_state) == -2;'
-                then:
-                  - light.turn_on:
-                      id: status_led
-                      effect: "Sensor Fault"
+# binary_sensor:
+#   - platform: sen6x
+#     sen6x_id: sen6x_dev
+#     co2_error:
+#       id: sen6x_co2_error
+#       name: "SEN - Error - CO2"
+#       internal: true

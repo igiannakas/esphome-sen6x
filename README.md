@@ -200,6 +200,10 @@ SEN66 + VEML7700, status LED, open-window detection, VOC state persistence); the
 is the same node on a part without CO2. `examples/sen65-veml7700-minimal.yaml` is the bare
 sensor. Wi-Fi credentials come from a `secrets.yaml` next to the file (`secrets.yaml.example`).
 
+Each air-quality node is two files. The node file holds the settings: its `substitutions:` and,
+on a SEN66, the CO2 block. The logic both nodes share is in `examples/common/air-quality-core.yaml`,
+which the node file pulls in under `packages:`. Copy the `common/` folder along with the node file.
+
 ## Tests
 
 `tests/` validates every option on ESP32 (esp-idf), ESP8266 and RP2040 with `esphome config`,
