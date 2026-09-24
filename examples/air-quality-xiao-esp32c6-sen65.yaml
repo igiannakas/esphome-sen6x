@@ -559,7 +559,7 @@ globals:
 
   # Automated VOC saves since boot. The save interval below
   # bumps it, so HA history shows each save at its exact time.
-  # The first one lands within seconds of boot.
+  # The first one lands one save interval after boot.
   - id: voc_save_count
     type: uint32_t
     restore_value: no
@@ -1646,6 +1646,10 @@ light:
 
 interval:
   - interval: ${voc_state_save_interval}
+    # Skips the tick that would otherwise fire seconds after
+    # boot, before the sensor has finished starting up, so the
+    # first save lands one interval in.
+    startup_delay: 5min
     then:
       - sen6x.save_voc_state: sen6x_dev
       - lambda: 'id(voc_save_count) += 1;'
