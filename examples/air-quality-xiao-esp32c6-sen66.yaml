@@ -141,7 +141,7 @@ substitutions:
   # Illuminance. Set it in Home Assistant from what Full
   # Spectrum shows with sun on the board.
   #
-  sun_lockout_lux_default: "500"
+  sun_lockout_lux_default: "1000"
   sun_lockout_minutes_default: "45"
   heat_spike_rate_default: "0.30"
   window_settle_samples: "3"
@@ -177,15 +177,23 @@ substitutions:
   lux_publish_min_gap: 4s
   lux_publish_delta: "10%"
   lux_publish_heartbeat: 300s
-  dark_room_threshold_default: "5"
+  dark_room_threshold_default: "1"
 
   # --- STATUS LED -------------------------------------------
+  #
+  # With LED - Ambient Light Control on, the LED dims with the
+  # room: min brightness at the Ambient Light Threshold, rising
+  # in proportion to max brightness at max_lux (compared with
+  # Illuminance), and holding there above it. With it off, the
+  # LED stays at max brightness. Brightness in %.
   #
   # Flashing is used for "ventilate" and sensor faults,
   # breathing for an open window. Keep breathe_fade just under
   # breathe_step.
   #
-  led_brightness: "70%"
+  led_brightness_max_default: "100"
+  led_brightness_min_default: "20"
+  led_brightness_max_lux_default: "400"
   led_flash_on: 200ms
   led_flash_off: 800ms
   led_breathe_step: 2000ms

@@ -4,7 +4,20 @@
 # The logic shared by every air quality node. Not a device on
 # its own: each device file includes it under packages: and
 # supplies every ${...} used here through its substitutions.
+# The few with defaults below may be left out of it.
 # ============================================================
+
+# ============================================================
+# DEFAULTS
+#
+# Used when the device file does not set them. Any it sets
+# win. See STATUS LED in the device file.
+# ============================================================
+
+substitutions:
+  led_brightness_max_default: "100"
+  led_brightness_min_default: "20"
+  led_brightness_max_lux_default: "400"
 
 # ============================================================
 # EXTERNAL COMPONENTS
@@ -49,6 +62,7 @@ esphome:
 
     - priority: -100
       then:
+        - script.execute: update_led_brightness
         - delay: 1s
         - script.execute: update_status_led
 
@@ -81,14 +95,10 @@ logger:
 
 api:
 
+# No VOC baseline save here: the only automatic save is the
+# interval under INTERVALS.
 ota:
   - platform: esphome
-    # Save the VOC baseline before the update reboots the node.
-    # Safe here in a way on_shutdown is not: the loop is still
-    # running, so the 20 ms read and the NVS write both land.
-    on_begin:
-      then:
-        - sen6x.save_voc_state: sen6x_dev
 
 wifi:
   ssid: "${wifi_ssid}"
@@ -158,6 +168,13 @@ globals:
     restore_value: no
     initial_value: '-1'
 
+  # LED brightness last applied, in whole percent. -1 = none
+  # yet, so the first update always lands.
+  - id: led_level_pct
+    type: int
+    restore_value: no
+    initial_value: '-1'
+
   # millis() of the last SEN6x reading, 0 = none yet
   - id: sen6x_last_update
     type: uint32_t
@@ -219,9 +236,9 @@ globals:
     restore_value: no
     initial_value: '0'
 
-  # Automated VOC saves since boot. The save interval below
+  # VOC saves since boot, interval and button. count_voc_save
   # bumps it, so HA history shows each save at its exact time.
-  # The first one lands one save interval after boot.
+  # The first interval save lands one save interval after boot.
   - id: voc_save_count
     type: uint32_t
     restore_value: no
@@ -244,7 +261,9 @@ sensor:
     ambient_light:
       id: veml7700_illuminance
       name: "Illuminance"
-      accuracy_decimals: 0
+      # One decimal, so a dark room can be read against a
+      # sub-1 lx threshold.
+      accuracy_decimals: 1
       # Throttle FIRST: the other order lets delta accept a
       # change and move its baseline, then throttle drops the
       # value — leaving HA stale until the next heartbeat.
@@ -253,10 +272,15 @@ sensor:
         - or:
             - delta: ${lux_publish_delta}
             - heartbeat: ${lux_publish_heartbeat}
+      # Every sample, ahead of the publish filters, so the LED
+      # follows the room at the sampling rate.
+      on_raw_value:
+        then:
+          - script.execute: update_led_brightness
     full_spectrum:
       id: veml7700_full_spectrum
       name: "Full Spectrum"
-      accuracy_decimals: 0
+      accuracy_decimals: 1
       filters: *lux_publish
     actual_gain:
       name: "VEML - Actual Gain"
@@ -270,6 +294,22 @@ sensor:
       disabled_by_default: true
       filters:
         - throttle: ${diag_interval}
+
+  # ----------------------------------------------------------
+  # LED - BRIGHTNESS  —  the level the LED is actually at
+  #
+  # LED - Status always shows 100%, because the dimming is
+  # applied underneath it (see update_led_brightness). This is
+  # the real figure. Published only when it changes.
+  # ----------------------------------------------------------
+  - platform: template
+    id: led_brightness_level
+    name: "LED - Brightness"
+    icon: mdi:brightness-percent
+    entity_category: diagnostic
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    update_interval: never
 
   # ----------------------------------------------------------
   # SEN6x  —  air quality
@@ -572,12 +612,13 @@ sensor:
     update_interval: ${diag_interval}
 
   # ----------------------------------------------------------
-  # VOC SAVES  —  one step per automated baseline save
+  # VOC SAVES  —  one step per baseline save
   #
-  # Counts the interval trigger, not the button or OTA save.
-  # update_interval: never — published from the interval, so a
-  # step in HA history is a save, timestamped. Drops back to
-  # zero on a reboot, which HA reads as a reset.
+  # Counts the interval saves and SEN - VOC Baseline Save
+  # presses. update_interval: never — published by
+  # count_voc_save, so a step in HA history is a save,
+  # timestamped. Drops back to zero on a reboot, which HA reads
+  # as a reset.
   # ----------------------------------------------------------
   - platform: template
     id: voc_save_counter
@@ -633,6 +674,9 @@ button:
     save_voc_state:
       name: "SEN - VOC Baseline Save"
       entity_category: diagnostic
+      on_press:
+        then:
+          - script.execute: count_voc_save
     restore_voc_state:
       name: "SEN - VOC Baseline Restore"
       entity_category: diagnostic
@@ -954,11 +998,76 @@ number:
     unit_of_measurement: lx
     min_value: 0
     max_value: 1000
-    step: 1
+    step: 0.1
     initial_value: ${dark_room_threshold_default}
     restore_value: true
     optimistic: true
     mode: box
+    on_value:
+      then:
+        - script.execute: update_led_brightness
+
+  # ----------------------------------------------------------
+  # LED BRIGHTNESS
+  #
+  # With Ambient Light Control on, the LED runs from Min
+  # Brightness at the Ambient Light Threshold up to Max
+  # Brightness at Max Brightness Illuminance, in proportion to
+  # Illuminance, and holds Max above that. With it off, the
+  # LED stays at Max Brightness.
+  # ----------------------------------------------------------
+  - platform: template
+    id: led_brightness_max
+    name: "LED - Max Brightness"
+    icon: mdi:brightness-7
+    entity_category: config
+    unit_of_measurement: "%"
+    min_value: 1
+    max_value: 100
+    step: 1
+    initial_value: ${led_brightness_max_default}
+    restore_value: true
+    optimistic: true
+    mode: box
+    on_value:
+      then:
+        - script.execute: update_led_brightness
+
+  # Above Max Brightness it is ignored; the LED holds at Max.
+  - platform: template
+    id: led_brightness_min
+    name: "LED - Min Brightness"
+    icon: mdi:brightness-5
+    entity_category: config
+    unit_of_measurement: "%"
+    min_value: 1
+    max_value: 100
+    step: 1
+    initial_value: ${led_brightness_min_default}
+    restore_value: true
+    optimistic: true
+    mode: box
+    on_value:
+      then:
+        - script.execute: update_led_brightness
+
+  # Compared with Illuminance, not Full Spectrum.
+  - platform: template
+    id: led_brightness_max_lux
+    name: "LED - Max Brightness Illuminance"
+    icon: mdi:brightness-auto
+    entity_category: config
+    unit_of_measurement: lx
+    min_value: 10
+    max_value: 5000
+    step: 10
+    initial_value: ${led_brightness_max_lux_default}
+    restore_value: true
+    optimistic: true
+    mode: box
+    on_value:
+      then:
+        - script.execute: update_led_brightness
 
   # ----------------------------------------------------------
   # WINDOW DETECTION THRESHOLDS
@@ -1072,7 +1181,8 @@ number:
 #
 #   SEN - Fan Clean               run a fan cleaning cycle
 #   LED - Night Mode              manual "LED always off"
-#   LED - Ambient Light Control   LED only when the room is lit
+#   LED - Ambient Light Control   LED only when the room is
+#                                 lit, dimmed to suit it
 #
 # Night Mode wins if both LED switches are on.
 # ============================================================
@@ -1128,9 +1238,11 @@ switch:
     restore_mode: RESTORE_DEFAULT_ON
     on_turn_on:
       then:
+        - script.execute: update_led_brightness
         - script.execute: update_status_led
     on_turn_off:
       then:
+        - script.execute: update_led_brightness
         - script.execute: update_status_led
 
 # ============================================================
@@ -1141,6 +1253,10 @@ switch:
 # room_is_lit, window_open, the LED switches, boot — so
 # anything driving the light by hand keeps showing until the
 # next one fires. Night Mode is the clean way to force it off.
+#
+# Every colour and effect below is at 100%: the LED is dimmed
+# as a whole by update_led_brightness, which covers the
+# flashing and breathing too.
 # ============================================================
 
 light:
@@ -1173,7 +1289,7 @@ light:
               green: 0%
               blue: 0%
               white: 0%
-              brightness: ${led_brightness}
+              brightness: 100%
               duration: ${led_flash_on}
             - state: false
               duration: ${led_flash_off}
@@ -1187,7 +1303,7 @@ light:
               green: 0%
               blue: 0%
               white: 100%
-              brightness: ${led_brightness}
+              brightness: 100%
               duration: ${led_flash_on}
             - state: false
               duration: ${led_flash_off}
@@ -1213,7 +1329,7 @@ light:
               green: 100%
               blue: 0%
               white: 0%
-              brightness: ${led_brightness}
+              brightness: 100%
               duration: ${led_breathe_step}
               transition_length: ${led_breathe_fade}
             - state: false
@@ -1228,7 +1344,7 @@ light:
               green: 45%
               blue: 0%
               white: 0%
-              brightness: ${led_brightness}
+              brightness: 100%
               duration: ${led_breathe_step}
               transition_length: ${led_breathe_fade}
             - state: false
@@ -1243,7 +1359,7 @@ light:
               green: 0%
               blue: 0%
               white: 0%
-              brightness: ${led_brightness}
+              brightness: 100%
               duration: ${led_breathe_step}
               transition_length: ${led_breathe_fade}
             - state: false
@@ -1260,7 +1376,7 @@ light:
               green: 0%
               blue: 0%
               white: 0%
-              brightness: ${led_brightness}
+              brightness: 100%
               duration: ${led_breathe_step}
               transition_length: ${led_breathe_fade}
             - state: false
@@ -1271,7 +1387,7 @@ light:
               green: 0%
               blue: 0%
               white: 0%
-              brightness: ${led_brightness}
+              brightness: 100%
               duration: ${led_flash_on}
             - state: false
               duration: ${led_flash_off}
@@ -1280,7 +1396,7 @@ light:
               green: 0%
               blue: 0%
               white: 0%
-              brightness: ${led_brightness}
+              brightness: 100%
               duration: ${led_flash_on}
             - state: false
               duration: ${led_flash_off}
@@ -1288,8 +1404,11 @@ light:
 # ============================================================
 # INTERVALS
 #
-# The unplanned reboot the OTA trigger cannot cover: a power
-# cut, a brownout, a watchdog. Worst case the restored baseline
+# The VOC baseline save, and the only automatic one: nothing
+# saves at boot, on a restart or before an OTA update. The
+# first save is one full interval after boot, then every
+# interval, so a node restarted more often than that keeps
+# the baseline it last saved. Worst case the restored baseline
 # is one interval stale, which still beats re-anchoring from
 # nothing.
 #
@@ -1300,14 +1419,14 @@ light:
 
 interval:
   - interval: ${voc_state_save_interval}
-    # Skips the tick that would otherwise fire seconds after
-    # boot, before the sensor has finished starting up, so the
-    # first save lands one interval in.
-    startup_delay: 5min
+    # An interval fires its first tick within 5s of starting,
+    # not one interval in, so it is held back for a full
+    # interval: first save at one interval of uptime, not at
+    # boot. (A shorter delay only moves that early save.)
+    startup_delay: ${voc_state_save_interval}
     then:
       - sen6x.save_voc_state: sen6x_dev
-      - lambda: 'id(voc_save_count) += 1;'
-      - component.update: voc_save_counter
+      - script.execute: count_voc_save
 
   # ----------------------------------------------------------
   # LED SELF-HEAL
@@ -1343,6 +1462,17 @@ interval:
 script:
 
   # ----------------------------------------------------------
+  # COUNT VOC SAVE  —  steps SEN - VOC Saves
+  #
+  # From both save paths: the interval and the button.
+  # ----------------------------------------------------------
+  - id: count_voc_save
+    mode: queued
+    then:
+      - lambda: 'id(voc_save_count) += 1;'
+      - component.update: voc_save_counter
+
+  # ----------------------------------------------------------
   # FAN CLEAN CYCLE
   #
   # The SEN6x only accepts fan cleaning in idle mode, so the
@@ -1374,6 +1504,81 @@ script:
       # Release the switch: the sensor is measuring again, even
       # though values stay held back for the startup delay.
       - switch.turn_off: fan_clean
+
+  # ----------------------------------------------------------
+  # UPDATE LED BRIGHTNESS
+  #
+  # Called on every lux sample, on the four LED numbers and on
+  # the Ambient Light Control switch.
+  #
+  #   below Ambient Light Threshold    off (room_is_lit)
+  #   threshold to Max Brightness      Min to Max Brightness,
+  #     Illuminance                    in proportion
+  #   above                            Max Brightness
+  #
+  # The threshold decides lit/dark against Full Spectrum but
+  # starts the ramp here as an Illuminance value. Illuminance
+  # usually reads the lower of the two, so the LED comes on at
+  # Min Brightness. No lux reading -> Max, matching
+  # room_is_lit's "report lit" fallback.
+  #
+  # The level is applied as the strip's colour correction, not
+  # the light's brightness, because the strobe effects carry a
+  # fixed brightness in YAML — correction scales the output
+  # after them, so flashing and breathing dim too.
+  #
+  # Whole-percent steps, and a 1% change is ignored unless it
+  # lands on Min or Max, so sensor noise does not keep
+  # repainting the LED.
+  # ----------------------------------------------------------
+  - id: update_led_brightness
+    mode: restart
+    then:
+      - lambda: |-
+          const float hi = id(led_brightness_max).state;
+          const float lo = std::min(id(led_brightness_min).state, hi);
+          const float t    = id(ambient_light_threshold).state;
+          const float full = id(led_brightness_max_lux).state;
+          const float lux  = id(veml7700_illuminance).get_raw_state();
+          if (isnan(hi) || isnan(lo)) {
+            return;
+          }
+
+          float level = hi;
+          if (id(ambient_light_led_control).state &&
+              !isnan(lux) && !isnan(t) && !isnan(full)) {
+            float f = (full > t) ? (lux - t) / (full - t)
+                                 : (lux >= full ? 1.0f : 0.0f);
+            f = std::max(0.0f, std::min(f, 1.0f));
+            level = lo + (hi - lo) * f;
+          }
+
+          const int pct  = (int) lroundf(level);
+          const int prev = id(led_level_pct);
+          if (pct == prev) {
+            return;
+          }
+          if (abs(pct - prev) < 2 &&
+              pct != (int) lroundf(lo) && pct != (int) lroundf(hi)) {
+            return;
+          }
+          id(led_level_pct) = pct;
+
+          auto *led = id(status_led);
+          auto *out = static_cast<light::AddressableLight *>(led->get_output());
+          const float k = pct / 100.0f;
+          out->set_correction(k, k, k, k);
+
+          // Effects take the new level on their next step, fades
+          // on their next frame. A steady colour is only redrawn
+          // when something changes it, so redraw it here.
+          if (led->current_values.is_on() &&
+              led->get_current_effect_index() == 0 &&
+              !led->is_transformer_active()) {
+            out->update_state(led);
+          }
+
+          id(led_brightness_level).publish_state(pct);
 
   # ----------------------------------------------------------
   # UPDATE STATUS LED
@@ -1434,7 +1639,7 @@ script:
                             green: 100%
                             blue: 0%
                             white: 0%
-                            brightness: ${led_brightness}
+                            brightness: 100%
 
             # Level 1 -> AMBER
             - if:
@@ -1456,7 +1661,7 @@ script:
                             green: 45%
                             blue: 0%
                             white: 0%
-                            brightness: ${led_brightness}
+                            brightness: 100%
 
             # Level 2 -> RED
             - if:
@@ -1478,7 +1683,7 @@ script:
                             green: 0%
                             blue: 0%
                             white: 0%
-                            brightness: ${led_brightness}
+                            brightness: 100%
 
             # Level 3 -> FLASHING RED, or breathe/blink/breathe
             # while a window is open.
