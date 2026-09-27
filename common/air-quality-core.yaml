@@ -105,7 +105,7 @@ wifi:
   ssid: "${wifi_ssid}"
   password: "${wifi_password}"
   ap:
-    ssid: "${device_name} Fallback"
+    ssid: "${device_name}"
     password: "${wifi_password}"
 captive_portal:
 
@@ -245,6 +245,14 @@ globals:
     restore_value: no
     initial_value: '0'
 
+  # Raw VOC reading taken as zero by SEN - VOC Raw Set Zero.
+  # NAN until the button is first pressed. Kept across
+  # restarts.
+  - id: voc_raw_zero
+    type: float
+    restore_value: yes
+    initial_value: 'NAN'
+
 # ============================================================
 # SENSORS
 # ============================================================
@@ -373,11 +381,15 @@ sensor:
       id: sen6x_voc_raw
       name: "VOC Raw"
       # The sensor's raw VOC signal, updated with the VOC Index.
-      # It falls as VOCs rise, so it is mirrored here (65535
-      # minus the reading) to rise with the index and stay
-      # positive.
+      # Shown as the zero point taken by SEN - VOC Raw Set Zero
+      # minus the reading, so it reads 0 at that point and rises
+      # as VOCs rise. Until a zero has been taken it shows 65535
+      # minus the reading.
       filters:
-        - lambda: return 65535.0 - x;
+        - lambda: |-
+            if (isnan(id(voc_raw_zero)))
+              return 65535.0f - x;
+            return id(voc_raw_zero) - x;
     nox_index:
       id: sen6x_nox
       name: "NOx Index"
@@ -649,8 +661,8 @@ sensor:
 # left off. NOx has no equivalent command and does still start
 # from scratch on every boot.
 #
-# Both platforms default to entity_category: config; diagnostic
-# here to keep them with the other device controls in HA.
+# All set to entity_category: diagnostic to keep them with the
+# other device controls in HA.
 # ============================================================
 
 button:
@@ -693,6 +705,31 @@ button:
     reset_voc_algorithm:
       name: "SEN - VOC Baseline Reset"
       entity_category: diagnostic
+
+  # ----------------------------------------------------------
+  # VOC RAW ZERO
+  #
+  # Takes the current raw VOC reading as the zero point of
+  # VOC Raw. Press again to take a new one. Kept across
+  # restarts; it reaches flash within a minute of the press.
+  # Does nothing before the first reading after boot.
+  # ----------------------------------------------------------
+  - platform: template
+    name: "SEN - VOC Raw Set Zero"
+    icon: mdi:numeric-0-circle-outline
+    entity_category: diagnostic
+    on_press:
+      then:
+        - lambda: |-
+            const float raw = id(sen6x_voc_raw).get_raw_state();
+            if (isnan(raw)) {
+              ESP_LOGW("voc_raw", "No raw VOC reading yet; zero not set");
+              return;
+            }
+            id(voc_raw_zero) = raw;
+            ESP_LOGI("voc_raw", "Zero set at %.0f ticks", raw);
+            // Show the new zero now rather than at the next update
+            id(sen6x_voc_raw).publish_state(raw);
 
 # ============================================================
 # BINARY SENSORS
