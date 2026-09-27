@@ -61,6 +61,7 @@ from esphome.core import ID
 from esphome.cpp_generator import MockObj, TemplateArgsType
 from esphome.types import ConfigType
 
+CONF_RAW_VOC = "raw_voc"
 CONF_TEMPERATURE_ACCELERATION = "temperature_acceleration"
 CONF_RESTORE_VOC_STATE_ON_BOOT = "restore_voc_state_on_boot"
 CONF_K = "k"
@@ -211,6 +212,13 @@ CONFIG_SCHEMA = cv.All(
                 gating_max_duration=720,
                 std_initial=None,
             ),
+            # Raw VOC ticks (datasheet 4.8.11/4.8.12), read in the same cycle as the VOC Index
+            cv.Optional(CONF_RAW_VOC): sensor.sensor_schema(
+                unit_of_measurement="ticks",
+                icon=ICON_RADIATOR,
+                accuracy_decimals=0,
+                state_class=STATE_CLASS_MEASUREMENT,
+            ),
             cv.Optional(CONF_CO2): sensor.sensor_schema(
                 unit_of_measurement=UNIT_PARTS_PER_MILLION,
                 icon=ICON_MOLECULE_CO2,
@@ -291,6 +299,7 @@ SENSOR_MAP = {
     CONF_HUMIDITY: "set_humidity_sensor",
     CONF_VOC_INDEX: "set_voc_sensor",
     CONF_NOX_INDEX: "set_nox_sensor",
+    CONF_RAW_VOC: "set_raw_voc_sensor",
     CONF_CO2: "set_co2_sensor",
     CONF_FORMALDEHYDE: "set_hcho_sensor",
 }

@@ -43,6 +43,11 @@ static constexpr uint16_t SEN6X_CMD_READ_MEASUREMENT_SEN65 = 0x0446;
 static constexpr uint16_t SEN6X_CMD_READ_MEASUREMENT_SEN68 = 0x0467;
 static constexpr uint16_t SEN6X_CMD_READ_MEASUREMENT_SEN69C = 0x04B5;
 
+// Read Measured Raw Values (datasheet sections 4.8.11, 4.8.12). SEN62/SEN63C have a raw-values
+// command too (4.8.10), but it carries no VOC signal.
+static constexpr uint16_t SEN6X_CMD_READ_RAW_VALUES = 0x0455;  // SEN65, SEN68, SEN69C
+static constexpr uint16_t SEN6X_CMD_READ_RAW_VALUES_SEN66 = 0x0405;
+
 static constexpr uint16_t SEN6X_CMD_READ_NUMBER_CONCENTRATION = 0x0316;
 static constexpr uint16_t SEN6X_CMD_START_MEASUREMENTS = 0x0021;
 static constexpr uint16_t SEN6X_CMD_STOP_MEASUREMENTS = 0x0104;
@@ -182,6 +187,10 @@ void SEN6XComponent::setup() {
           if (this->nox_sensor_ && !has_voc_nox) {
             ESP_LOGE(TAG, "NOx requires SEN65, SEN66, SEN68, or SEN69C");
             this->nox_sensor_ = nullptr;
+          }
+          if (this->raw_voc_sensor_ && !has_voc_nox) {
+            ESP_LOGE(TAG, "Raw VOC requires SEN65, SEN66, SEN68, or SEN69C");
+            this->raw_voc_sensor_ = nullptr;
           }
           if (this->co2_sensor_ && !has_co2) {
             ESP_LOGE(TAG, "CO2 requires SEN63C, SEN66, or SEN69C");
@@ -426,6 +435,7 @@ void SEN6XComponent::dump_config() {
   LOG_SENSOR("  ", "Humidity", this->humidity_sensor_);
   LOG_SENSOR("  ", "VOC", this->voc_sensor_);
   LOG_SENSOR("  ", "NOx", this->nox_sensor_);
+  LOG_SENSOR("  ", "Raw VOC", this->raw_voc_sensor_);
   LOG_SENSOR("  ", "HCHO", this->hcho_sensor_);
   LOG_SENSOR("  ", "CO2", this->co2_sensor_);
 #ifdef USE_BINARY_SENSOR
@@ -477,6 +487,8 @@ void SEN6XComponent::update() {
   //                      -> write_command (read measurement)
   //                      -> timeout I2C_READ_DELAY
   //                        -> parse_and_publish_measurements_()
+  //                          -> read_raw_values_() if raw_voc is configured
+  //                          -> read_number_concentration_() if any pmc_* is configured
   //
   // All timeouts share a single ID (TIMEOUT_POLL) since only one is active
   // at a time. cancel_timeout in update() stops any in-flight chain.
@@ -680,6 +692,48 @@ void SEN6XComponent::parse_and_publish_measurements_() {
 
   this->status_clear_warning();
 
+  // Same cycle as the VOC Index, so the raw signal is published at the same rate
+  if (this->raw_voc_sensor_ != nullptr) {
+    this->read_raw_values_();
+    return;
+  }
+  this->read_number_concentration_or_finish_();
+}
+
+void SEN6XComponent::read_raw_values_() {
+  const uint16_t cmd = this->sen6x_type_ == SEN66 ? SEN6X_CMD_READ_RAW_VALUES_SEN66 : SEN6X_CMD_READ_RAW_VALUES;
+  if (!this->write_command(cmd)) {
+    this->status_set_warning();
+    ESP_LOGD(TAG, "Read raw values failed (%d)", this->last_error_);
+    this->finish_poll_cycle_();
+    return;
+  }
+
+  this->set_timeout(TIMEOUT_POLL, I2C_READ_DELAY, [this]() { this->parse_and_publish_raw_values_(); });
+}
+
+// Raw humidity, raw temperature, raw VOC, raw NOx and, on SEN66 only, raw CO2. Only the VOC word is
+// published; the full response is read so the transfer ends where the device expects it to.
+void SEN6XComponent::parse_and_publish_raw_values_() {
+  uint16_t raw[5];
+  const uint8_t words = this->sen6x_type_ == SEN66 ? 5 : 4;
+
+  if (!this->read_data(raw, words)) {
+    this->status_set_warning();
+    ESP_LOGD(TAG, "Read data failed (%d)", this->last_error_);
+    this->finish_poll_cycle_();
+    return;
+  }
+
+  // Ticks, unscaled uint16; 0xFFFF means unknown
+  const uint16_t raw_voc = raw[2];
+  if (this->raw_voc_sensor_ != nullptr)
+    this->raw_voc_sensor_->publish_state(raw_voc == 0xFFFF ? NAN : static_cast<float>(raw_voc));
+
+  this->read_number_concentration_or_finish_();
+}
+
+void SEN6XComponent::read_number_concentration_or_finish_() {
   if (this->pmc_0_5_sensor_ != nullptr || this->pmc_1_0_sensor_ != nullptr || this->pmc_2_5_sensor_ != nullptr ||
       this->pmc_4_0_sensor_ != nullptr || this->pmc_10_0_sensor_ != nullptr) {
     this->read_number_concentration_();

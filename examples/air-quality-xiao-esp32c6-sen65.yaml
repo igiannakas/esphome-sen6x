@@ -2,8 +2,8 @@
 # AIR QUALITY  —  XIAO ESP32-C6 + SEN65 + VEML7700
 #
 # The settings for one node. The logic is in
-# common/air-quality-core.yaml, which must sit next to this
-# file.
+# air-quality-core.yaml, which is fetched from GitHub when the
+# node is built (see CORE below).
 #
 # Values ending _default only set a starting value in Home
 # Assistant. After the first boot, change them there.
@@ -210,12 +210,19 @@ substitutions:
 # ============================================================
 # CORE
 #
-# The shared logic. It lives in a subfolder so the ESPHome
-# dashboard does not list it as a device.
+# The shared logic, fetched from the esphome-sen6x repository
+# on GitHub, so nothing else needs to be stored next to this
+# file. refresh: always fetches the latest version on every
+# build.
 # ============================================================
 
 packages:
-  core: !include common/air-quality-core.yaml
+  core:
+    url: https://github.com/igiannakas/esphome-sen6x
+    ref: main
+    files:
+      - common/air-quality-core.yaml
+    refresh: always
 
 # ============================================================
 # MODEL: SEN66 only

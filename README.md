@@ -16,8 +16,9 @@ On top of the core component this carries:
 | Device-status binary sensors (`fan_error` … `pm_error`, read-and-clear 0xD210) | upstream PR #18784 |
 | Action wait windows no longer break after 24.8 days of uptime (`millis()` wrap) | this repo |
 | **VOC algorithm state** save / restore / reset (0x6181, 0xD304), with a boot-time restore issued in idle mode as the datasheet requires | this repo |
+| Raw VOC signal sensor `raw_voc` (0x0405, 0x0455) | this repo |
 
-Once the upstream PRs land in a release, everything but the last two rows is in core.
+Once the upstream PRs land in a release, everything but the last three rows is in core.
 
 ## Installation
 
@@ -33,7 +34,7 @@ external_components:
 |---|:-:|:-:|:-:|:-:|:-:|:-:|
 | PM mass (`pm_*`) and number (`pmc_*`) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `temperature`, `humidity` | | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `voc_index`, `nox_index` | | | ✓ | ✓ | ✓ | ✓ |
+| `voc_index`, `nox_index`, `raw_voc` | | | ✓ | ✓ | ✓ | ✓ |
 | `co2` | | ✓ | | ✓ | | ✓ |
 | `formaldehyde` | | | | | ✓ | ✓ |
 
@@ -101,6 +102,10 @@ sensor:
         learning_time_gain_hours: 12
         gating_max_duration_minutes: 720
         gain_factor: 230
+    raw_voc:                          # raw VOC signal, ticks
+      name: VOC Raw
+      filters:
+        - lambda: return 65535.0 - x;  # optional; makes it rise with the VOC Index
     co2:
       name: CO2
       automatic_self_calibration: true
@@ -112,6 +117,11 @@ sensor:
 ```
 
 `voc:` and `nox:` still work as the old names of `voc_index:` / `nox_index:` (removed in 2027.2).
+
+`raw_voc` is the VOC sensor's raw signal (SRAW_VOC, 0–65535 ticks, datasheet 4.8.11 / 4.8.12),
+the value the VOC Index is worked out from. It is read in the same update as the index, so it
+publishes at the same rate. It falls as VOCs rise; `65535.0 - x` mirrors it within its range so a
+graph of it moves the same way as the index and stays positive.
 
 ### Device status
 
@@ -197,12 +207,13 @@ accepted. NOx has no equivalent command and starts from scratch on every boot.
 
 `examples/air-quality-xiao-esp32c6-sen66.yaml` is a complete air-quality node (XIAO ESP32-C6,
 SEN66 + VEML7700, status LED, open-window detection, VOC state persistence); the `-sen65` variant
-is the same node on a part without CO2. `examples/sen65-veml7700-minimal.yaml` is the bare
-sensor. Wi-Fi credentials come from a `secrets.yaml` next to the file (`secrets.yaml.example`).
+is the same node on a part without CO2. Wi-Fi credentials come from a `secrets.yaml` next to the
+file (`secrets.yaml.example`).
 
 Each air-quality node is two files. The node file holds the settings: its `substitutions:` and,
-on a SEN66, the CO2 block. The logic both nodes share is in `examples/common/air-quality-core.yaml`,
-which the node file pulls in under `packages:`. Copy the `common/` folder along with the node file.
+on a SEN66, the CO2 block. The logic both nodes share is in `common/air-quality-core.yaml`,
+which the node file fetches from this repository on GitHub under `packages:` every time it is
+built. The node file and `secrets.yaml` are all you need locally.
 
 ## Tests
 
@@ -214,6 +225,7 @@ plus the partial `algorithm_tuning` case; CI runs them and the examples on every
 | Path | Contents |
 |---|---|
 | `components/sen6x/` | the component (what `external_components` fetches) |
+| `common/` | the air-quality logic the example nodes fetch under `packages:` |
 | `examples/` | complete configs |
 | `tests/` | config-validation tests |
 

@@ -54,6 +54,7 @@ class SEN6XComponent final : public PollingComponent, public sensirion_common::S
   SUB_SENSOR(humidity)
   SUB_SENSOR(voc)
   SUB_SENSOR(nox)
+  SUB_SENSOR(raw_voc)
   SUB_SENSOR(co2)
   SUB_SENSOR(hcho)
 #ifdef USE_BINARY_SENSOR
@@ -125,6 +126,9 @@ class SEN6XComponent final : public PollingComponent, public sensirion_common::S
   void poll_data_ready_();
   void read_measurements_();
   void parse_and_publish_measurements_();
+  void read_raw_values_();
+  void parse_and_publish_raw_values_();
+  void read_number_concentration_or_finish_();
   void read_number_concentration_();
   void parse_and_publish_number_concentration_();
   void start_poll_chain_();
