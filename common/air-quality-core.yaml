@@ -399,6 +399,12 @@ sensor:
             if (isnan(id(voc_raw_zero)))
               return 65535.0f - x;
             return id(voc_raw_zero) - x;
+      # The reading before the offset, for SEN - VOC Raw Value
+      # (pre-offset)
+      on_raw_value:
+        - sensor.template.publish:
+            id: voc_raw_value
+            state: !lambda 'return x;'
     nox_index:
       id: sen6x_nox
       name: "NOx Index"
@@ -714,6 +720,26 @@ sensor:
     entity_category: diagnostic
     unit_of_measurement: "points/tick"
     accuracy_decimals: 3
+    state_class: measurement
+    update_interval: never
+
+  # ----------------------------------------------------------
+  # VOC RAW VALUE (PRE-OFFSET)
+  #
+  # The raw VOC reading in ticks, before SEN - VOC Raw Zero
+  # Offset is applied, updated with VOC Raw. It is the value
+  # SEN - VOC Raw Set Zero takes, so comparing it with the
+  # offset shows how far the signal has drifted since the zero
+  # was set. Named to sit next to the offset in HA's
+  # Diagnostic list.
+  # ----------------------------------------------------------
+  - platform: template
+    id: voc_raw_value
+    name: "SEN - VOC Raw Value (pre-offset)"
+    icon: mdi:radiator
+    entity_category: diagnostic
+    unit_of_measurement: ticks
+    accuracy_decimals: 0
     state_class: measurement
     update_interval: never
 
