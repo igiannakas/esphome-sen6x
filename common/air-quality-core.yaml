@@ -109,8 +109,12 @@ wifi:
     password: "${wifi_password}"
 captive_portal:
 
+# include_internal also lists the entities kept out of HA:
+# the VOC Baseline Restore and Reset buttons, the SEN - Error
+# flags and SEN - Sensor Active.
 web_server:
   port: 80
+  include_internal: true
 
 # ============================================================
 # I2C BUS   (pins in the device file's PINS block)
@@ -245,8 +249,8 @@ globals:
     restore_value: no
     initial_value: '0'
 
-  # Raw VOC reading taken as zero by SEN - VOC Raw Set Zero.
-  # NAN until the button is first pressed. Kept across
+  # The raw VOC zero offset behind SEN - VOC Raw Zero Offset
+  # (under NUMBERS). NAN until first set. Kept across
   # restarts.
   - id: voc_raw_zero
     type: float
@@ -335,6 +339,12 @@ sensor:
     # the only window in which it is accepted, and it applies
     # once. No-op until a save has actually run.
     restore_voc_state_on_boot: true
+    # Refreshes VOC CALIBRATION whenever the stored VOC state
+    # changes: each save, at boot when it is read back, and
+    # after a VOC Baseline Reset.
+    on_voc_state_stored:
+      then:
+        - script.execute: publish_voc_calibration
     pm_1_0:
       id: sen6x_pm1
       name: "PM1"
@@ -381,10 +391,9 @@ sensor:
       id: sen6x_voc_raw
       name: "VOC Raw"
       # The sensor's raw VOC signal, updated with the VOC Index.
-      # Shown as the zero point taken by SEN - VOC Raw Set Zero
-      # minus the reading, so it reads 0 at that point and rises
-      # as VOCs rise. Until a zero has been taken it shows 65535
-      # minus the reading.
+      # Shown as SEN - VOC Raw Zero Offset minus the reading, so
+      # it reads 0 at the offset and rises as VOCs rise. Until
+      # an offset has been set it shows 65535 minus the reading.
       filters:
         - lambda: |-
             if (isnan(id(voc_raw_zero)))
@@ -652,6 +661,62 @@ sensor:
     update_interval: never
     lambda: 'return id(voc_save_count);'
 
+  # ----------------------------------------------------------
+  # VOC CALIBRATION  —  what the VOC algorithm has learned
+  #
+  # Read from the saved VOC state, so these change with each
+  # save (button or interval) and show the stored values after
+  # a boot. Blank after a VOC Baseline Reset until the next
+  # save.
+  #
+  #   Mean           the raw reading the room counts as normal
+  #                  air; VOC Index 100 sits here
+  #   Std Dev        how far the raw reading usually strays
+  #                  from the mean
+  #   Points/Tick    VOC Index points per tick the raw reading
+  #                  drops below the mean, before the index's
+  #                  final scaling curve
+  #
+  # The VOC Index is worked out from these as
+  #
+  #   (reading - mean) / -(std dev + 220) x 230
+  #
+  # then a curve that maps 0 onto 100. 220 is Sensirion's std
+  # dev bonus and 230 the default VOC gain factor, which
+  # Points/Tick assumes. Decoded as Sensirion's gas index
+  # algorithm stores its state; the SEN6x datasheet only calls
+  # it 8 bytes.
+  # ----------------------------------------------------------
+  - platform: template
+    id: voc_cal_mean
+    name: "SEN - VOC Mean"
+    icon: mdi:chart-bell-curve
+    entity_category: diagnostic
+    unit_of_measurement: ticks
+    accuracy_decimals: 1
+    state_class: measurement
+    update_interval: never
+
+  - platform: template
+    id: voc_cal_std_dev
+    name: "SEN - VOC Std Dev"
+    icon: mdi:sigma
+    entity_category: diagnostic
+    unit_of_measurement: ticks
+    accuracy_decimals: 1
+    state_class: measurement
+    update_interval: never
+
+  - platform: template
+    id: voc_cal_points_per_tick
+    name: "SEN - VOC Index Points per Tick"
+    icon: mdi:slope-downhill
+    entity_category: diagnostic
+    unit_of_measurement: "points/tick"
+    accuracy_decimals: 3
+    state_class: measurement
+    update_interval: never
+
 # ============================================================
 # BUTTONS
 #
@@ -690,6 +755,9 @@ button:
   # below a device reset clears it. It drops the stored copy
   # too, otherwise the next boot would restore the baseline you
   # just threw away.
+  #
+  # Restore and Reset are internal: not in HA, only on the
+  # device's web page.
   # ----------------------------------------------------------
   - platform: sen6x
     sen6x_id: sen6x_dev
@@ -702,17 +770,20 @@ button:
     restore_voc_state:
       name: "SEN - VOC Baseline Restore"
       entity_category: diagnostic
+      internal: true
     reset_voc_algorithm:
       name: "SEN - VOC Baseline Reset"
       entity_category: diagnostic
+      internal: true
 
   # ----------------------------------------------------------
-  # VOC RAW ZERO
+  # VOC RAW SET ZERO
   #
-  # Takes the current raw VOC reading as the zero point of
-  # VOC Raw. Press again to take a new one. Kept across
-  # restarts; it reaches flash within a minute of the press.
-  # Does nothing before the first reading after boot.
+  # Sets SEN - VOC Raw Zero Offset to the current raw VOC
+  # reading, so VOC Raw reads 0 from here. Press again to take
+  # a new one. Does nothing before the first reading after
+  # boot. With Auto Adjust on, the next save replaces it with
+  # SEN - VOC Mean.
   # ----------------------------------------------------------
   - platform: template
     name: "SEN - VOC Raw Set Zero"
@@ -726,10 +797,10 @@ button:
               ESP_LOGW("voc_raw", "No raw VOC reading yet; zero not set");
               return;
             }
-            id(voc_raw_zero) = raw;
             ESP_LOGI("voc_raw", "Zero set at %.0f ticks", raw);
-            // Show the new zero now rather than at the next update
-            id(sen6x_voc_raw).publish_state(raw);
+            auto call = id(voc_raw_zero_offset).make_call();
+            call.set_value(raw);
+            call.perform();
 
 # ============================================================
 # BINARY SENSORS
@@ -814,11 +885,7 @@ binary_sensor:
               id(air_quality_led_state) = -2;
               id(update_status_led).execute();
             }
-        # Leaving -2 was previously a side effect of the next
-        # air_quality_level publish happening to differ. Nothing
-        # cleared the fault, so a missed edge anywhere in that
-        # chain left the LED flashing white with every entity
-        # reading OK. Re-derive the level here instead: its
+        # Re-derive the level. Its
         # on_value sets the state and repaints the LED.
         - if:
             condition:
@@ -1219,6 +1286,40 @@ number:
     optimistic: true
     mode: box
 
+  # ----------------------------------------------------------
+  # VOC RAW ZERO OFFSET
+  #
+  # The raw VOC reading VOC Raw is measured from: VOC Raw is
+  # this minus the reading. SEN - VOC Raw Set Zero sets it to
+  # the current reading, or type a value in here; with SEN -
+  # VOC Raw Zero Offset Auto Adjust on it follows SEN - VOC
+  # Mean instead. Shows 65535 until first set, which is what
+  # VOC Raw uses until then.
+  # Kept across restarts; a change reaches flash within a
+  # minute.
+  # ----------------------------------------------------------
+  - platform: template
+    id: voc_raw_zero_offset
+    name: "SEN - VOC Raw Zero Offset"
+    icon: mdi:numeric-0-box-outline
+    entity_category: diagnostic
+    unit_of_measurement: ticks
+    min_value: 0
+    max_value: 65535
+    step: 1
+    mode: box
+    lambda: |-
+      return isnan(id(voc_raw_zero)) ? 65535.0f : id(voc_raw_zero);
+    set_action:
+      - lambda: |-
+          id(voc_raw_zero) = x;
+          id(voc_raw_zero_offset).publish_state(x);
+          // Show VOC Raw against the new offset now rather than
+          // at the next update
+          const float raw = id(sen6x_voc_raw).get_raw_state();
+          if (!isnan(raw))
+            id(sen6x_voc_raw).publish_state(raw);
+
 # ============================================================
 # SWITCHES
 #
@@ -1230,6 +1331,9 @@ number:
 #   LED - Night Mode              manual "LED always off"
 #   LED - Ambient Light Control   LED only when the room is
 #                                 lit, dimmed to suit it
+#   SEN - VOC Raw Zero Offset Auto Adjust
+#                                 keep the VOC Raw zero on
+#                                 the learned VOC Mean
 #
 # Night Mode wins if both LED switches are on.
 # ============================================================
@@ -1291,6 +1395,25 @@ switch:
       then:
         - script.execute: update_led_brightness
         - script.execute: update_status_led
+
+  # ----------------------------------------------------------
+  # VOC RAW ZERO OFFSET AUTO ADJUST
+  #
+  # On: SEN - VOC Raw Zero Offset follows SEN - VOC Mean, set
+  # when switched on and again at every save, so VOC Raw reads
+  # 0 at the air the algorithm counts as normal. Off (default):
+  # the offset stays where it was last set.
+  # ----------------------------------------------------------
+  - platform: template
+    name: "SEN - VOC Raw Zero Offset Auto Adjust"
+    id: voc_raw_zero_auto
+    icon: mdi:sync
+    entity_category: diagnostic
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    on_turn_on:
+      then:
+        - script.execute: sync_voc_raw_zero
 
 # ============================================================
 # STATUS LED  —  single SK6812 RGBW NeoPixel
@@ -1518,6 +1641,49 @@ script:
     then:
       - lambda: 'id(voc_save_count) += 1;'
       - component.update: voc_save_counter
+
+  # ----------------------------------------------------------
+  # PUBLISH VOC CALIBRATION  —  from on_voc_state_stored
+  #
+  # The stored state is two 16.16 fixed-point numbers: the
+  # mean, kept less 20000, and the std dev.
+  # ----------------------------------------------------------
+  - id: publish_voc_calibration
+    then:
+      - lambda: |-
+          if (!id(sen6x_dev).has_voc_state()) {
+            id(voc_cal_mean).publish_state(NAN);
+            id(voc_cal_std_dev).publish_state(NAN);
+            id(voc_cal_points_per_tick).publish_state(NAN);
+            return;
+          }
+          const auto s = id(sen6x_dev).get_voc_state();
+          const float mean = (int16_t) s[0] + s[1] / 65536.0f + 20000.0f;
+          const float std_dev = (int16_t) s[2] + s[3] / 65536.0f;
+          id(voc_cal_mean).publish_state(mean);
+          id(voc_cal_std_dev).publish_state(std_dev);
+          // VOC Index = (reading - mean) / -(std dev + 220) x 230,
+          // before the final scaling curve
+          id(voc_cal_points_per_tick).publish_state(230.0f / (std_dev + 220.0f));
+      - script.execute: sync_voc_raw_zero
+
+  # ----------------------------------------------------------
+  # SYNC VOC RAW ZERO
+  #
+  # With SEN - VOC Raw Zero Offset Auto Adjust on, sets SEN -
+  # VOC Raw Zero Offset to SEN - VOC Mean.
+  # ----------------------------------------------------------
+  - id: sync_voc_raw_zero
+    then:
+      - lambda: |-
+          if (!id(voc_raw_zero_auto).state)
+            return;
+          const float mean = id(voc_cal_mean).state;
+          if (isnan(mean))
+            return;
+          auto call = id(voc_raw_zero_offset).make_call();
+          call.set_value(roundf(mean));
+          call.perform();
 
   # ----------------------------------------------------------
   # FAN CLEAN CYCLE

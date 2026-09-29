@@ -53,6 +53,9 @@ sensor:
     type: SEN66                       # optional; the part is detected from its product name
     startup_delay: 60s                # readings are held back this long after start (max 1h)
     restore_voc_state_on_boot: true   # default; hand a saved VOC state back during setup
+    on_voc_state_stored:              # the stored VOC state changed; see VOC algorithm state
+      then:
+        - logger.log: VOC state stored
     temperature_compensation:         # self-heating correction, datasheet 4.8.13
       offset: -0.3                    # °C, -163.84..163.835
       normalized_offset_slope: 0      # -3.2768..3.2767
@@ -175,7 +178,8 @@ button:
 All take the component id (`sen6x.save_voc_state: sen6x_dev`). Every command opens a wait window
 during which the next one is refused with "Device busy"; a fan clean needs stop → 2 s → clean →
 11 s → start. From a lambda: `id(sen6x_dev).save_voc_state()`, `restore_voc_state()`,
-`reset_voc_algorithm()` and `has_voc_state()` (true once a state is in flash).
+`reset_voc_algorithm()`, `has_voc_state()` (true once a state is in flash) and `get_voc_state()`
+(its four words).
 
 ## VOC algorithm state
 
@@ -202,6 +206,11 @@ runs. A save is one 8-byte NVS write; at 6 h that is ~1,500 a year. With
 `restore_voc_state_on_boot: true` (the default) the stored state is written back during setup,
 while the sensor is still idle and before the measurement starts — the only window in which it is
 accepted. NOx has no equivalent command and starts from scratch on every boot.
+
+`on_voc_state_stored` runs whenever the stored state changes: after every save, once during setup
+when it is read back from flash, and when a reset clears it. `get_voc_state()` returns the four
+words. The datasheet treats them as opaque; the example node decodes them as Sensirion's gas index
+algorithm stores its state, into the learned mean and standard deviation of the raw VOC signal.
 
 ## Examples
 

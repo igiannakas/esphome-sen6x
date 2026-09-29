@@ -922,6 +922,7 @@ bool SEN6XComponent::load_voc_state_and_restore_() {
 
   memcpy(this->voc_state_, stored, sizeof(this->voc_state_));
   this->voc_state_valid_ = true;
+  this->voc_state_stored_callback_.call();
   if (!this->restore_voc_state_on_boot_) {
     ESP_LOGD(TAG, "Saved VOC state kept but not restored (restore on boot disabled)");
     return false;
@@ -986,6 +987,7 @@ void SEN6XComponent::service_pending_voc_save_() {
     global_preferences->sync();
     ESP_LOGI(TAG, "Saved VOC state: %04X %04X %04X %04X", this->voc_state_[0], this->voc_state_[1], this->voc_state_[2],
              this->voc_state_[3]);
+    this->voc_state_stored_callback_.call();
   });
 }
 
@@ -1099,6 +1101,7 @@ void SEN6XComponent::clear_voc_state_() {
   // An all-zero blob is the "nothing saved" marker; preferences have no erase
   this->voc_pref_.save(&this->voc_state_);
   global_preferences->sync();
+  this->voc_state_stored_callback_.call();
 }
 
 #ifdef USE_BINARY_SENSOR

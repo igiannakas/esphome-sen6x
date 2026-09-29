@@ -36,6 +36,7 @@ from esphome.const import (
     CONF_TEMPERATURE,
     CONF_TEMPERATURE_COMPENSATION,
     CONF_TIME_CONSTANT,
+    CONF_TRIGGER_ID,
     CONF_TYPE,
     CONF_VOC,
     DEVICE_CLASS_CARBON_DIOXIDE,
@@ -61,6 +62,7 @@ from esphome.core import ID
 from esphome.cpp_generator import MockObj, TemplateArgsType
 from esphome.types import ConfigType
 
+CONF_ON_VOC_STATE_STORED = "on_voc_state_stored"
 CONF_RAW_VOC = "raw_voc"
 CONF_TEMPERATURE_ACCELERATION = "temperature_acceleration"
 CONF_RESTORE_VOC_STATE_ON_BOOT = "restore_voc_state_on_boot"
@@ -84,6 +86,9 @@ ActivateHeaterAction = sen6x_ns.class_("ActivateHeaterAction", automation.Action
 SaveVocStateAction = sen6x_ns.class_("SaveVocStateAction", automation.Action)
 RestoreVocStateAction = sen6x_ns.class_("RestoreVocStateAction", automation.Action)
 ResetVocAlgorithmAction = sen6x_ns.class_("ResetVocAlgorithmAction", automation.Action)
+VocStateStoredTrigger = sen6x_ns.class_(
+    "VocStateStoredTrigger", automation.Trigger.template()
+)
 
 
 def _gas_index_schema(
@@ -250,6 +255,13 @@ CONFIG_SCHEMA = cv.All(
                 cv.Range(max=cv.TimePeriod(hours=1)),
             ),
             cv.Optional(CONF_RESTORE_VOC_STATE_ON_BOOT, default=True): cv.boolean,
+            cv.Optional(CONF_ON_VOC_STATE_STORED): automation.validate_automation(
+                {
+                    cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(
+                        VocStateStoredTrigger
+                    ),
+                }
+            ),
             cv.Optional(CONF_TEMPERATURE_COMPENSATION): cv.Schema(
                 {
                     cv.Optional(CONF_OFFSET, default=0): cv.float_range(
@@ -315,6 +327,9 @@ async def to_code(config: ConfigType) -> None:
 
     cg.add(var.set_startup_delay(config[CONF_STARTUP_DELAY]))
     cg.add(var.set_restore_voc_state_on_boot(config[CONF_RESTORE_VOC_STATE_ON_BOOT]))
+    for conf in config.get(CONF_ON_VOC_STATE_STORED, []):
+        trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)
+        await automation.build_automation(trigger, [], conf)
 
     if (comp := config.get(CONF_TEMPERATURE_COMPENSATION)) is not None:
         cg.add(

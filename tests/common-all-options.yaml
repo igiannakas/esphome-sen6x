@@ -10,6 +10,13 @@ sensor:
     i2c_id: i2c_bus
     startup_delay: 30s
     restore_voc_state_on_boot: true
+    on_voc_state_stored:
+      then:
+        - lambda: |-
+            if (id(sen6x_sensor).has_voc_state()) {
+              const auto state = id(sen6x_sensor).get_voc_state();
+              ESP_LOGI("test", "VOC state %04X", state[0]);
+            }
     temperature_compensation:
       offset: 0
       normalized_offset_slope: 0

@@ -6,6 +6,8 @@
 #include "esphome/core/preferences.h"
 #include "esphome/components/sensor/sensor.h"
 #include "esphome/components/sensirion_common/i2c_sensirion.h"
+#include <array>
+#include <utility>
 #ifdef USE_BINARY_SENSOR
 #include "esphome/components/binary_sensor/binary_sensor.h"
 #endif
@@ -111,6 +113,26 @@ class SEN6XComponent final : public PollingComponent, public sensirion_common::S
   void restore_voc_state();
   void reset_voc_algorithm();
   bool has_voc_state() const { return this->voc_state_valid_; }
+  // The four words of the stored VOC state as the device hands them out; meaningful while has_voc_state().
+  //
+  // The datasheet documents the state only as 8 opaque bytes. They match the two states of Sensirion's gas
+  // index algorithm (github.com/Sensirion/gas-index-algorithm, GasIndexAlgorithm_get_states), each a
+  // big-endian 16.16 fixed-point number learned from the raw VOC signal:
+  //   words 0-1  mean of the raw signal, stored less 20000 (GasIndexAlgorithm_VOC_SRAW_MINIMUM)
+  //   words 2-3  standard deviation of the raw signal
+  // From them the algorithm turns a raw reading into the VOC Index as
+  //   (reading - mean) / -(std + 220) x 230
+  // where 220 is GasIndexAlgorithm_SRAW_STD_BONUS_VOC and 230 the default gain factor (VOC tuning, 0x60D0).
+  // A sigmoid then maps the result onto the 0..500 index scale, 0 landing on index_offset (100 by default),
+  // and a low-pass filter smooths it.
+  std::array<uint16_t, 4> get_voc_state() const {
+    return {this->voc_state_[0], this->voc_state_[1], this->voc_state_[2], this->voc_state_[3]};
+  }
+  // Runs whenever the stored VOC state changes: after each save, when it is read back from flash
+  // during setup, and when a VOC algorithm reset clears it
+  template<typename F> void add_on_voc_state_stored_callback(F &&callback) {
+    this->voc_state_stored_callback_.add(std::forward<F>(callback));
+  }
 
  protected:
   Sen6xType infer_type_from_product_name_(const std::string &product_name);
@@ -188,6 +210,7 @@ class SEN6XComponent final : public PollingComponent, public sensirion_common::S
   bool restore_voc_state_on_boot_{true};
   uint16_t voc_state_[4]{0};
   ESPPreferenceObject voc_pref_;
+  CallbackManager<void()> voc_state_stored_callback_;
 };
 
 }  // namespace esphome::sen6x

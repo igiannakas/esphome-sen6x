@@ -75,4 +75,11 @@ template<typename... Ts> class ResetVocAlgorithmAction final : public Action<Ts.
   SEN6XComponent *sen6x_;
 };
 
+class VocStateStoredTrigger : public Trigger<> {
+ public:
+  explicit VocStateStoredTrigger(SEN6XComponent *sen6x) {
+    sen6x->add_on_voc_state_stored_callback([this]() { this->trigger(); });
+  }
+};
+
 }  // namespace esphome::sen6x
