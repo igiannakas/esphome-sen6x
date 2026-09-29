@@ -679,9 +679,11 @@ sensor:
   #                  air; VOC Index 100 sits here
   #   Std Dev        how far the raw reading usually strays
   #                  from the mean
-  #   Points/Tick    VOC Index points per tick the raw reading
+  #   Sensitivity    VOC Index points per tick the raw reading
   #                  drops below the mean, before the index's
-  #                  final scaling curve
+  #                  final curve. The index itself moves less
+  #                  than this in clean air and more above
+  #                  100.
   #
   # The VOC Index is worked out from these as
   #
@@ -689,7 +691,7 @@ sensor:
   #
   # then a curve that maps 0 onto 100. 220 is Sensirion's std
   # dev bonus and 230 the default VOC gain factor, which
-  # Points/Tick assumes. Decoded as Sensirion's gas index
+  # Sensitivity assumes. Decoded as Sensirion's gas index
   # algorithm stores its state; the SEN6x datasheet only calls
   # it 8 bytes.
   # ----------------------------------------------------------
@@ -714,8 +716,8 @@ sensor:
     update_interval: never
 
   - platform: template
-    id: voc_cal_points_per_tick
-    name: "SEN - VOC Index Points per Tick"
+    id: voc_cal_sensitivity
+    name: "SEN - VOC Sensitivity"
     icon: mdi:slope-downhill
     entity_category: diagnostic
     unit_of_measurement: "points/tick"
@@ -1680,7 +1682,7 @@ script:
           if (!id(sen6x_dev).has_voc_state()) {
             id(voc_cal_mean).publish_state(NAN);
             id(voc_cal_std_dev).publish_state(NAN);
-            id(voc_cal_points_per_tick).publish_state(NAN);
+            id(voc_cal_sensitivity).publish_state(NAN);
             return;
           }
           const auto s = id(sen6x_dev).get_voc_state();
@@ -1690,7 +1692,7 @@ script:
           id(voc_cal_std_dev).publish_state(std_dev);
           // VOC Index = (reading - mean) / -(std dev + 220) x 230,
           // before the final scaling curve
-          id(voc_cal_points_per_tick).publish_state(230.0f / (std_dev + 220.0f));
+          id(voc_cal_sensitivity).publish_state(230.0f / (std_dev + 220.0f));
       - script.execute: sync_voc_raw_zero
 
   # ----------------------------------------------------------
