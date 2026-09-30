@@ -161,7 +161,7 @@ substitutions:
   # How often SEN - VOC Mean, Std Dev and Sensitivity are
   # refreshed from the sensor. Nothing is saved.
   #
-  voc_state_read_interval: 5min
+  voc_state_read_interval: 10min
 
   # --- LIGHT SENSOR -----------------------------------------
   #

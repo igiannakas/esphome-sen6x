@@ -19,7 +19,7 @@ substitutions:
   led_brightness_max_default: "100"
   led_brightness_min_default: "20"
   led_brightness_max_lux_default: "400"
-  voc_state_read_interval: 5min
+  voc_state_read_interval: 10min
 
 # ============================================================
 # EXTERNAL COMPONENTS
@@ -672,7 +672,7 @@ sensor:
   # ----------------------------------------------------------
   # VOC CALIBRATION  —  what the VOC algorithm has learned
   #
-  # Read from the sensor every voc_state_read_interval (5 min
+  # Read from the sensor every voc_state_read_interval (10 min
   # unless the device file sets it) and at each save; the
   # reads save nothing. After a boot they show the stored
   # values until the first read. Blank after a VOC Baseline
