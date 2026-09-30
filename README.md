@@ -56,6 +56,9 @@ sensor:
     on_voc_state_stored:              # the stored VOC state changed; see VOC algorithm state
       then:
         - logger.log: VOC state stored
+    on_voc_state_update:              # the latest VOC state changed (reads too); same section
+      then:
+        - logger.log: VOC state updated
     temperature_compensation:         # self-heating correction, datasheet 4.8.13
       offset: -0.3                    # °C, -163.84..163.835
       normalized_offset_slope: 0      # -3.2768..3.2767
@@ -172,14 +175,16 @@ button:
 | `sen6x.start_fan_cleaning` | ~10 s fan burst; idle mode only (datasheet 4.8.22), warns and does nothing while measuring |
 | `sen6x.activate_sht_heater` | RH&T heater; idle mode only (4.8.23) |
 | `sen6x.save_voc_state` | read the VOC algorithm state and write it to flash (works while measuring) |
+| `sen6x.read_voc_state` | read the VOC algorithm state without storing it |
 | `sen6x.restore_voc_state` | stop, hand the stored state back, start again |
 | `sen6x.reset_voc_algorithm` | device reset of the VOC engine and drop the stored copy |
 
 All take the component id (`sen6x.save_voc_state: sen6x_dev`). Every command opens a wait window
 during which the next one is refused with "Device busy"; a fan clean needs stop → 2 s → clean →
 11 s → start. From a lambda: `id(sen6x_dev).save_voc_state()`, `restore_voc_state()`,
-`reset_voc_algorithm()`, `has_voc_state()` (true once a state is in flash) and `get_voc_state()`
-(its four words).
+`reset_voc_algorithm()`, `read_voc_state()`, `has_voc_state()` (true once a state is in flash),
+`get_voc_state()` (its four words), and `has_latest_voc_state()` / `get_latest_voc_state()` (the
+most recent state read or saved).
 
 ## VOC algorithm state
 
@@ -211,6 +216,11 @@ accepted. NOx has no equivalent command and starts from scratch on every boot.
 when it is read back from flash, and when a reset clears it. `get_voc_state()` returns the four
 words. The datasheet treats them as opaque; the example node decodes them as Sensirion's gas index
 algorithm stores its state, into the learned mean and standard deviation of the raw VOC signal.
+
+`sen6x.read_voc_state` fetches the state without writing flash, so it can run far more often than a
+save (the datasheet allows it every measurement interval). A restore still hands back the stored
+copy. `on_voc_state_update` runs whenever `get_latest_voc_state()` changes: after every read or
+save, once during setup from the stored copy, and when a reset clears it.
 
 ## Examples
 

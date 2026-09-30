@@ -155,6 +155,13 @@ substitutions:
   #
   voc_state_save_interval: 6h
 
+  # --- VOC CALIBRATION READ ---------------------------------
+  #
+  # How often SEN - VOC Mean, Std Dev and Sensitivity are
+  # refreshed from the sensor. Nothing is saved.
+  #
+  voc_state_read_interval: 5min
+
   # --- LIGHT SENSOR -----------------------------------------
   #
   # With LED - Ambient Light Control on, the LED only lights

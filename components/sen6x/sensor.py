@@ -63,6 +63,7 @@ from esphome.cpp_generator import MockObj, TemplateArgsType
 from esphome.types import ConfigType
 
 CONF_ON_VOC_STATE_STORED = "on_voc_state_stored"
+CONF_ON_VOC_STATE_UPDATE = "on_voc_state_update"
 CONF_RAW_VOC = "raw_voc"
 CONF_TEMPERATURE_ACCELERATION = "temperature_acceleration"
 CONF_RESTORE_VOC_STATE_ON_BOOT = "restore_voc_state_on_boot"
@@ -84,10 +85,14 @@ StopMeasurementAction = sen6x_ns.class_("StopMeasurementAction", automation.Acti
 StartFanCleaningAction = sen6x_ns.class_("StartFanCleaningAction", automation.Action)
 ActivateHeaterAction = sen6x_ns.class_("ActivateHeaterAction", automation.Action)
 SaveVocStateAction = sen6x_ns.class_("SaveVocStateAction", automation.Action)
+ReadVocStateAction = sen6x_ns.class_("ReadVocStateAction", automation.Action)
 RestoreVocStateAction = sen6x_ns.class_("RestoreVocStateAction", automation.Action)
 ResetVocAlgorithmAction = sen6x_ns.class_("ResetVocAlgorithmAction", automation.Action)
 VocStateStoredTrigger = sen6x_ns.class_(
     "VocStateStoredTrigger", automation.Trigger.template()
+)
+VocStateUpdateTrigger = sen6x_ns.class_(
+    "VocStateUpdateTrigger", automation.Trigger.template()
 )
 
 
@@ -262,6 +267,13 @@ CONFIG_SCHEMA = cv.All(
                     ),
                 }
             ),
+            cv.Optional(CONF_ON_VOC_STATE_UPDATE): automation.validate_automation(
+                {
+                    cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(
+                        VocStateUpdateTrigger
+                    ),
+                }
+            ),
             cv.Optional(CONF_TEMPERATURE_COMPENSATION): cv.Schema(
                 {
                     cv.Optional(CONF_OFFSET, default=0): cv.float_range(
@@ -328,6 +340,9 @@ async def to_code(config: ConfigType) -> None:
     cg.add(var.set_startup_delay(config[CONF_STARTUP_DELAY]))
     cg.add(var.set_restore_voc_state_on_boot(config[CONF_RESTORE_VOC_STATE_ON_BOOT]))
     for conf in config.get(CONF_ON_VOC_STATE_STORED, []):
+        trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)
+        await automation.build_automation(trigger, [], conf)
+    for conf in config.get(CONF_ON_VOC_STATE_UPDATE, []):
         trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)
         await automation.build_automation(trigger, [], conf)
 
@@ -417,6 +432,12 @@ SEN6X_ACTION_SCHEMA = maybe_simple_id(
 @automation.register_action(
     "sen6x.save_voc_state",
     SaveVocStateAction,
+    SEN6X_ACTION_SCHEMA,
+    synchronous=True,
+)
+@automation.register_action(
+    "sen6x.read_voc_state",
+    ReadVocStateAction,
     SEN6X_ACTION_SCHEMA,
     synchronous=True,
 )

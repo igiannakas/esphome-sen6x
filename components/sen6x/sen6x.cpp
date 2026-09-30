@@ -455,7 +455,7 @@ void SEN6XComponent::update() {
   }
   if (!this->measuring_) {
     // No poll chain runs while idle, so a queued VOC state read is serviced here instead
-    this->service_pending_voc_save_();
+    this->service_pending_voc_state_read_();
     return;
   }
   if (this->voc_sequence_active_) {
@@ -923,6 +923,7 @@ bool SEN6XComponent::load_voc_state_and_restore_() {
   memcpy(this->voc_state_, stored, sizeof(this->voc_state_));
   this->voc_state_valid_ = true;
   this->voc_state_stored_callback_.call();
+  this->set_latest_voc_state_(stored);
   if (!this->restore_voc_state_on_boot_) {
     ESP_LOGD(TAG, "Saved VOC state kept but not restored (restore on boot disabled)");
     return false;
@@ -938,7 +939,7 @@ bool SEN6XComponent::load_voc_state_and_restore_() {
 // two device-status failure paths do not, because they continue into poll_data_ready_().
 void SEN6XComponent::finish_poll_cycle_() {
   this->poll_active_ = false;
-  this->service_pending_voc_save_();
+  this->service_pending_voc_state_read_();
 }
 
 void SEN6XComponent::save_voc_state() {
@@ -951,29 +952,50 @@ void SEN6XComponent::save_voc_state() {
   // Only when no chain is in flight does the read go out straight away.
   this->voc_save_pending_ = true;
   if (!this->poll_active_)
-    this->service_pending_voc_save_();
+    this->service_pending_voc_state_read_();
 }
 
-void SEN6XComponent::service_pending_voc_save_() {
-  if (!this->voc_save_pending_ || this->voc_sequence_active_ || this->poll_active_ || this->command_blocked_())
+void SEN6XComponent::read_voc_state() {
+  if (!this->initialized_ || !this->voc_supported_) {
+    ESP_LOGD(TAG, "VOC state unavailable");
+    return;
+  }
+  // Queued exactly like a save, so it never lands inside a poll chain
+  this->voc_read_pending_ = true;
+  if (!this->poll_active_)
+    this->service_pending_voc_state_read_();
+}
+
+// Services a queued save or read. Both start with the same Get VOC Algorithm State; a save then
+// stores what it read, so a save pending alongside a read answers both.
+void SEN6XComponent::service_pending_voc_state_read_() {
+  if ((!this->voc_save_pending_ && !this->voc_read_pending_) || this->voc_sequence_active_ || this->poll_active_ ||
+      this->command_blocked_())
     return;
 
+  const bool store = this->voc_save_pending_;
   if (!this->write_command(SEN6X_CMD_VOC_ALGORITHM_STATE)) {
     this->status_set_warning();
     ESP_LOGW(TAG, "Read VOC state failed (%d)", this->last_error_);
     return;  // stays queued, retried on the next cycle
   }
   this->voc_save_pending_ = false;
+  this->voc_read_pending_ = false;
   // Held until the read completes so a restore or reset pressed meanwhile is refused rather than
   // silently cancelling this timeout, which shares its ID
   this->voc_sequence_active_ = true;
 
-  this->set_timeout(TIMEOUT_ACTION, CMD_EXEC_DELAY, [this]() {
+  this->set_timeout(TIMEOUT_ACTION, CMD_EXEC_DELAY, [this, store]() {
     this->voc_sequence_active_ = false;
     uint16_t state[4];
     if (!this->read_data(state, 4)) {
       this->status_set_warning();
       ESP_LOGW(TAG, "Read VOC state failed (%d)", this->last_error_);
+      return;
+    }
+    this->set_latest_voc_state_(state);
+    if (!store) {
+      ESP_LOGD(TAG, "Read VOC state: %04X %04X %04X %04X", state[0], state[1], state[2], state[3]);
       return;
     }
     memcpy(this->voc_state_, state, sizeof(this->voc_state_));
@@ -1077,6 +1099,7 @@ void SEN6XComponent::reset_voc_algorithm() {
     this->measuring_ = false;
     this->startup_complete_ = false;
     this->voc_save_pending_ = false;
+    this->voc_read_pending_ = false;
     // Otherwise the next boot would restore the calibration that was just discarded
     this->clear_voc_state_();
     // Every setting the component writes is volatile and is back at its default after the reset,
@@ -1102,6 +1125,16 @@ void SEN6XComponent::clear_voc_state_() {
   this->voc_pref_.save(&this->voc_state_);
   global_preferences->sync();
   this->voc_state_stored_callback_.call();
+  // The device's own state went with the reset, so the latest copy goes too
+  memset(this->voc_state_latest_, 0, sizeof(this->voc_state_latest_));
+  this->voc_state_latest_valid_ = false;
+  this->voc_state_update_callback_.call();
+}
+
+void SEN6XComponent::set_latest_voc_state_(const uint16_t *state) {
+  memcpy(this->voc_state_latest_, state, sizeof(this->voc_state_latest_));
+  this->voc_state_latest_valid_ = true;
+  this->voc_state_update_callback_.call();
 }
 
 #ifdef USE_BINARY_SENSOR

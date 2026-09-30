@@ -17,6 +17,13 @@ sensor:
               const auto state = id(sen6x_sensor).get_voc_state();
               ESP_LOGI("test", "VOC state %04X", state[0]);
             }
+    on_voc_state_update:
+      then:
+        - lambda: |-
+            if (id(sen6x_sensor).has_latest_voc_state()) {
+              const auto state = id(sen6x_sensor).get_latest_voc_state();
+              ESP_LOGI("test", "Latest VOC state %04X", state[0]);
+            }
     temperature_compensation:
       offset: 0
       normalized_offset_slope: 0
@@ -106,6 +113,8 @@ button:
     name: VOC State Actions
     on_press:
       - sen6x.save_voc_state: sen6x_sensor
+      - delay: 1s
+      - sen6x.read_voc_state: sen6x_sensor
       - delay: 1s
       - sen6x.restore_voc_state: sen6x_sensor
       - delay: 1s

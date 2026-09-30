@@ -11,13 +11,15 @@
 # DEFAULTS
 #
 # Used when the device file does not set them. Any it sets
-# win. See STATUS LED in the device file.
+# win. See STATUS LED and VOC CALIBRATION READ in the device
+# file.
 # ============================================================
 
 substitutions:
   led_brightness_max_default: "100"
   led_brightness_min_default: "20"
   led_brightness_max_lux_default: "400"
+  voc_state_read_interval: 5min
 
 # ============================================================
 # EXTERNAL COMPONENTS
@@ -339,10 +341,10 @@ sensor:
     # the only window in which it is accepted, and it applies
     # once. No-op until a save has actually run.
     restore_voc_state_on_boot: true
-    # Refreshes VOC CALIBRATION whenever the stored VOC state
-    # changes: each save, at boot when it is read back, and
-    # after a VOC Baseline Reset.
-    on_voc_state_stored:
+    # Refreshes VOC CALIBRATION whenever the latest VOC state
+    # changes: each read (see INTERVALS) and save, at boot from
+    # the stored copy, and after a VOC Baseline Reset.
+    on_voc_state_update:
       then:
         - script.execute: publish_voc_calibration
     pm_1_0:
@@ -670,10 +672,11 @@ sensor:
   # ----------------------------------------------------------
   # VOC CALIBRATION  —  what the VOC algorithm has learned
   #
-  # Read from the saved VOC state, so these change with each
-  # save (button or interval) and show the stored values after
-  # a boot. Blank after a VOC Baseline Reset until the next
-  # save.
+  # Read from the sensor every voc_state_read_interval (5 min
+  # unless the device file sets it) and at each save; the
+  # reads save nothing. After a boot they show the stored
+  # values until the first read. Blank after a VOC Baseline
+  # Reset until the next read.
   #
   #   Mean           the raw reading the room counts as normal
   #                  air; VOC Index 100 sits here
@@ -810,8 +813,8 @@ button:
   # Sets SEN - VOC Raw Zero Offset to the current raw VOC
   # reading, so VOC Raw reads 0 from here. Press again to take
   # a new one. Does nothing before the first reading after
-  # boot. With Auto Adjust on, the next save replaces it with
-  # SEN - VOC Mean.
+  # boot. With Auto Adjust on, the next calibration update
+  # replaces it with SEN - VOC Mean.
   # ----------------------------------------------------------
   - platform: template
     name: "SEN - VOC Raw Set Zero"
@@ -1428,9 +1431,10 @@ switch:
   # VOC RAW ZERO OFFSET AUTO ADJUST
   #
   # On: SEN - VOC Raw Zero Offset follows SEN - VOC Mean, set
-  # when switched on and again at every save, so VOC Raw reads
-  # 0 at the air the algorithm counts as normal. Off (default):
-  # the offset stays where it was last set.
+  # when switched on and at every calibration update (each
+  # read and save), so VOC Raw reads 0 at the air the
+  # algorithm counts as normal and matches the Mean shown.
+  # Off (default): the offset stays where it was last set.
   # ----------------------------------------------------------
   - platform: template
     name: "SEN - VOC Raw Zero Offset Auto Adjust"
@@ -1627,6 +1631,16 @@ interval:
       - script.execute: count_voc_save
 
   # ----------------------------------------------------------
+  # VOC CALIBRATION READ
+  #
+  # Reads the VOC state for VOC CALIBRATION without saving it;
+  # the saves above are unaffected.
+  # ----------------------------------------------------------
+  - interval: ${voc_state_read_interval}
+    then:
+      - sen6x.read_voc_state: sen6x_dev
+
+  # ----------------------------------------------------------
   # LED SELF-HEAL
   #
   # Everything that paints the LED is edge-driven, so a single
@@ -1671,21 +1685,21 @@ script:
       - component.update: voc_save_counter
 
   # ----------------------------------------------------------
-  # PUBLISH VOC CALIBRATION  —  from on_voc_state_stored
+  # PUBLISH VOC CALIBRATION  —  from on_voc_state_update
   #
-  # The stored state is two 16.16 fixed-point numbers: the
-  # mean, kept less 20000, and the std dev.
+  # The state is two 16.16 fixed-point numbers: the mean, kept
+  # less 20000, and the std dev.
   # ----------------------------------------------------------
   - id: publish_voc_calibration
     then:
       - lambda: |-
-          if (!id(sen6x_dev).has_voc_state()) {
+          if (!id(sen6x_dev).has_latest_voc_state()) {
             id(voc_cal_mean).publish_state(NAN);
             id(voc_cal_std_dev).publish_state(NAN);
             id(voc_cal_sensitivity).publish_state(NAN);
             return;
           }
-          const auto s = id(sen6x_dev).get_voc_state();
+          const auto s = id(sen6x_dev).get_latest_voc_state();
           const float mean = (int16_t) s[0] + s[1] / 65536.0f + 20000.0f;
           const float std_dev = (int16_t) s[2] + s[3] / 65536.0f;
           id(voc_cal_mean).publish_state(mean);

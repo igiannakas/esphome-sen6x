@@ -110,6 +110,8 @@ class SEN6XComponent final : public PollingComponent, public sensirion_common::S
   // VOC algorithm state (datasheet sections 4.8.27, 4.8.28, 4.8.21). Saving and restoring are
   // always explicit: nothing here runs on a timer, it is driven from YAML.
   void save_voc_state();
+  // Reads the state from the device without storing it; see get_latest_voc_state()
+  void read_voc_state();
   void restore_voc_state();
   void reset_voc_algorithm();
   bool has_voc_state() const { return this->voc_state_valid_; }
@@ -132,6 +134,19 @@ class SEN6XComponent final : public PollingComponent, public sensirion_common::S
   // during setup, and when a VOC algorithm reset clears it
   template<typename F> void add_on_voc_state_stored_callback(F &&callback) {
     this->voc_state_stored_callback_.add(std::forward<F>(callback));
+  }
+  // The most recent VOC state known, in the same layout as get_voc_state(): from the last read or save,
+  // or the stored copy until the first of those after boot. Kept apart from the stored copy, which is
+  // what a restore hands back.
+  bool has_latest_voc_state() const { return this->voc_state_latest_valid_; }
+  std::array<uint16_t, 4> get_latest_voc_state() const {
+    return {this->voc_state_latest_[0], this->voc_state_latest_[1], this->voc_state_latest_[2],
+            this->voc_state_latest_[3]};
+  }
+  // Runs whenever the latest VOC state changes: after each read or save, when the stored copy is read
+  // back during setup, and when a VOC algorithm reset clears it
+  template<typename F> void add_on_voc_state_update_callback(F &&callback) {
+    this->voc_state_update_callback_.add(std::forward<F>(callback));
   }
 
  protected:
@@ -156,7 +171,8 @@ class SEN6XComponent final : public PollingComponent, public sensirion_common::S
   void start_poll_chain_();
   void finish_poll_cycle_();
   bool load_voc_state_and_restore_();
-  void service_pending_voc_save_();
+  void service_pending_voc_state_read_();
+  void set_latest_voc_state_(const uint16_t *state);
   void clear_voc_state_();
 #ifdef USE_BINARY_SENSOR
   void read_device_status_();
@@ -202,6 +218,8 @@ class SEN6XComponent final : public PollingComponent, public sensirion_common::S
   // make_preference() allocates a backend that is never freed, so it is called once per boot
   bool voc_pref_ready_{false};
   bool voc_save_pending_{false};
+  bool voc_read_pending_{false};
+  bool voc_state_latest_valid_{false};
   // Set while a stop/write/start sequence owns the bus, so nothing else writes underneath it
   bool voc_sequence_active_{false};
   // Set from the first bus write of a poll cycle until finish_poll_cycle_(), so a queued VOC state
@@ -209,8 +227,10 @@ class SEN6XComponent final : public PollingComponent, public sensirion_common::S
   bool poll_active_{false};
   bool restore_voc_state_on_boot_{true};
   uint16_t voc_state_[4]{0};
+  uint16_t voc_state_latest_[4]{0};
   ESPPreferenceObject voc_pref_;
   CallbackManager<void()> voc_state_stored_callback_;
+  CallbackManager<void()> voc_state_update_callback_;
 };
 
 }  // namespace esphome::sen6x

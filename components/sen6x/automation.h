@@ -55,6 +55,16 @@ template<typename... Ts> class SaveVocStateAction final : public Action<Ts...> {
   SEN6XComponent *sen6x_;
 };
 
+template<typename... Ts> class ReadVocStateAction final : public Action<Ts...> {
+ public:
+  explicit ReadVocStateAction(SEN6XComponent *sen6x) : sen6x_(sen6x) {}
+
+  void play(const Ts &...x) override { this->sen6x_->read_voc_state(); }
+
+ protected:
+  SEN6XComponent *sen6x_;
+};
+
 template<typename... Ts> class RestoreVocStateAction final : public Action<Ts...> {
  public:
   explicit RestoreVocStateAction(SEN6XComponent *sen6x) : sen6x_(sen6x) {}
@@ -79,6 +89,13 @@ class VocStateStoredTrigger : public Trigger<> {
  public:
   explicit VocStateStoredTrigger(SEN6XComponent *sen6x) {
     sen6x->add_on_voc_state_stored_callback([this]() { this->trigger(); });
+  }
+};
+
+class VocStateUpdateTrigger : public Trigger<> {
+ public:
+  explicit VocStateUpdateTrigger(SEN6XComponent *sen6x) {
+    sen6x->add_on_voc_state_update_callback([this]() { this->trigger(); });
   }
 };
 
