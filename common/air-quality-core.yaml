@@ -414,8 +414,22 @@ sensor:
         - sliding_window_moving_average:
             window_size: 3
             send_every: 1
+      # SEN - VOC Raw Zero Offset Sync on Cleanest air: a reading
+      # above the zero is cleaner air, so it becomes the new zero
+      # before VOC Raw is published, and VOC Raw never shows the
+      # negative value (not while the sensor is warming up)
       on_value:
-        - component.update: sen6x_voc_raw
+        - if:
+            condition:
+              lambda: |-
+                return id(voc_raw_zero_sync).current_option() == "Cleanest air" &&
+                       !id(voc_raw_zero_warming) && !isnan(x) &&
+                       (isnan(id(voc_raw_zero)) || x > id(voc_raw_zero));
+            then:
+              # Set Zero publishes VOC Raw itself, at 0
+              - button.press: voc_raw_set_zero
+            else:
+              - component.update: sen6x_voc_raw
     nox_index:
       id: sen6x_nox
       name: "NOx Index"
@@ -759,18 +773,6 @@ sensor:
       if (isnan(id(voc_raw_zero)))
         return 65535.0f - reading;
       return id(voc_raw_zero) - reading;
-    # SEN - VOC Raw Zero Offset Sync on Cleanest air: below 0
-    # means cleaner air than the zero, so take a new zero (not
-    # while the sensor is warming up)
-    on_value:
-      - if:
-          condition:
-            lambda: |-
-              return id(voc_raw_zero_sync).current_option() == "Cleanest air" &&
-                     !id(voc_raw_zero_warming) &&
-                     (x < 0 || isnan(id(voc_raw_zero)));
-          then:
-            - button.press: voc_raw_set_zero
 
 # ============================================================
 # BUTTONS
@@ -1393,17 +1395,18 @@ select:
   # VOC RAW ZERO OFFSET SYNC  —  how the zero offset moves on
   # its own
   #
-  #   Cleanest air   (default) whenever VOC Raw drops below 0
-  #                  (air cleaner than at the zero), SEN - VOC
-  #                  Raw Set Zero is pressed, so the zero sits
-  #                  at the cleanest air seen and VOC Raw stays
-  #                  at 0 or above. It only ever moves towards
-  #                  cleaner air: press Set Zero, or pick
-  #                  another option, to bring it back. Held
-  #                  off for 10 min after a boot, a fan clean
-  #                  or a VOC baseline restore or reset, so a
-  #                  reading that has not settled yet cannot
-  #                  become the zero.
+  #   Cleanest air   (default) whenever a reading would put
+  #                  VOC Raw below 0 (air cleaner than at the
+  #                  zero), SEN - VOC Raw Set Zero is pressed
+  #                  first, so the zero sits at the cleanest
+  #                  air seen and VOC Raw stays at 0 or above.
+  #                  It only ever moves towards cleaner air:
+  #                  press Set Zero, or pick another option,
+  #                  to bring it back. Held off for 10 min
+  #                  after a boot, a fan clean or a VOC
+  #                  baseline restore or reset, so a reading
+  #                  that has not settled yet cannot become
+  #                  the zero; VOC Raw can go below 0 then.
   #   VOC Mean       follows SEN - VOC Mean at every
   #                  calibration update (each read and save),
   #                  so VOC Raw reads 0 at the air the
@@ -1767,7 +1770,8 @@ script:
   # SYNC VOC RAW ZERO  —  per SEN - VOC Raw Zero Offset Sync
   #
   # Runs when an option is picked and at every calibration
-  # update. On Cleanest air, VOC Raw also checks every reading.
+  # update. On Cleanest air, every reading is also checked as
+  # it comes in (SEN - VOC Raw Value (pre-offset)).
   # ----------------------------------------------------------
   - id: sync_voc_raw_zero
     then:
@@ -1783,7 +1787,7 @@ script:
           } else if (mode == "Cleanest air") {
             if (id(voc_raw_zero_warming) || isnan(id(sen6x_voc_raw_reading).state))
               return;
-            if (isnan(id(voc_raw_zero)) || id(sen6x_voc_raw).state < 0)
+            if (isnan(id(voc_raw_zero)) || id(sen6x_voc_raw_reading).state > id(voc_raw_zero))
               id(voc_raw_set_zero).press();
           }
 
