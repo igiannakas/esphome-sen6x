@@ -407,6 +407,16 @@ sensor:
         - sensor.template.publish:
             id: voc_raw_value
             state: !lambda 'return x;'
+      # SEN - VOC Raw Zero Offset Sync on Cleanest air: below 0
+      # means cleaner air than the zero, so take a new zero
+      on_value:
+        - if:
+            condition:
+              lambda: |-
+                return id(voc_raw_zero_sync).current_option() == "Cleanest air" &&
+                       (x < 0 || isnan(id(voc_raw_zero)));
+            then:
+              - button.press: voc_raw_set_zero
     nox_index:
       id: sen6x_nox
       name: "NOx Index"
@@ -813,10 +823,12 @@ button:
   # Sets SEN - VOC Raw Zero Offset to the current raw VOC
   # reading, so VOC Raw reads 0 from here. Press again to take
   # a new one. Does nothing before the first reading after
-  # boot. With Auto Adjust on, the next calibration update
-  # replaces it with SEN - VOC Mean.
+  # boot. SEN - VOC Raw Zero Offset Sync presses it on its own
+  # on Cleanest air; on VOC Mean the next calibration update
+  # replaces what it set.
   # ----------------------------------------------------------
   - platform: template
+    id: voc_raw_set_zero
     name: "SEN - VOC Raw Set Zero"
     icon: mdi:numeric-0-circle-outline
     entity_category: diagnostic
@@ -1322,10 +1334,10 @@ number:
   #
   # The raw VOC reading VOC Raw is measured from: VOC Raw is
   # this minus the reading. SEN - VOC Raw Set Zero sets it to
-  # the current reading, or type a value in here; with SEN -
-  # VOC Raw Zero Offset Auto Adjust on it follows SEN - VOC
-  # Mean instead. Shows 65535 until first set, which is what
-  # VOC Raw uses until then.
+  # the current reading, or type a value in here. SEN - VOC
+  # Raw Zero Offset Sync can also move it on its own. Shows
+  # 65535 until first set, which is what VOC Raw uses until
+  # then.
   # Kept across restarts; a change reaches flash within a
   # minute.
   # ----------------------------------------------------------
@@ -1352,6 +1364,47 @@ number:
             id(sen6x_voc_raw).publish_state(raw);
 
 # ============================================================
+# SELECTS
+# ============================================================
+
+select:
+
+  # ----------------------------------------------------------
+  # VOC RAW ZERO OFFSET SYNC  —  how the zero offset moves on
+  # its own
+  #
+  #   Cleanest air   whenever VOC Raw drops below 0 (air
+  #                  cleaner than at the zero), SEN - VOC Raw
+  #                  Set Zero is pressed, so the zero sits at
+  #                  the cleanest air seen and VOC Raw stays at
+  #                  0 or above. It only ever moves towards
+  #                  cleaner air: press Set Zero, or pick
+  #                  another option, to bring it back.
+  #   VOC Mean       follows SEN - VOC Mean at every
+  #                  calibration update (each read and save),
+  #                  so VOC Raw reads 0 at the air the
+  #                  algorithm counts as normal.
+  #   Off            never moves on its own (default).
+  #
+  # Applies as soon as it is picked. Kept across restarts.
+  # ----------------------------------------------------------
+  - platform: template
+    id: voc_raw_zero_sync
+    name: "SEN - VOC Raw Zero Offset Sync"
+    icon: mdi:sync
+    entity_category: diagnostic
+    options:
+      - "Cleanest air"
+      - "VOC Mean"
+      - "Off"
+    initial_option: "Off"
+    optimistic: true
+    restore_value: true
+    on_value:
+      then:
+        - script.execute: sync_voc_raw_zero
+
+# ============================================================
 # SWITCHES
 #
 # One YAML key, so the maintenance switch shares it with the
@@ -1362,9 +1415,6 @@ number:
 #   LED - Night Mode              manual "LED always off"
 #   LED - Ambient Light Control   LED only when the room is
 #                                 lit, dimmed to suit it
-#   SEN - VOC Raw Zero Offset Auto Adjust
-#                                 keep the VOC Raw zero on
-#                                 the learned VOC Mean
 #
 # Night Mode wins if both LED switches are on.
 # ============================================================
@@ -1426,26 +1476,6 @@ switch:
       then:
         - script.execute: update_led_brightness
         - script.execute: update_status_led
-
-  # ----------------------------------------------------------
-  # VOC RAW ZERO OFFSET AUTO ADJUST
-  #
-  # On: SEN - VOC Raw Zero Offset follows SEN - VOC Mean, set
-  # when switched on and at every calibration update (each
-  # read and save), so VOC Raw reads 0 at the air the
-  # algorithm counts as normal and matches the Mean shown.
-  # Off (default): the offset stays where it was last set.
-  # ----------------------------------------------------------
-  - platform: template
-    name: "SEN - VOC Raw Zero Offset Auto Adjust"
-    id: voc_raw_zero_auto
-    icon: mdi:sync
-    entity_category: diagnostic
-    optimistic: true
-    restore_mode: RESTORE_DEFAULT_OFF
-    on_turn_on:
-      then:
-        - script.execute: sync_voc_raw_zero
 
 # ============================================================
 # STATUS LED  —  single SK6812 RGBW NeoPixel
@@ -1710,22 +1740,28 @@ script:
       - script.execute: sync_voc_raw_zero
 
   # ----------------------------------------------------------
-  # SYNC VOC RAW ZERO
+  # SYNC VOC RAW ZERO  —  per SEN - VOC Raw Zero Offset Sync
   #
-  # With SEN - VOC Raw Zero Offset Auto Adjust on, sets SEN -
-  # VOC Raw Zero Offset to SEN - VOC Mean.
+  # Runs when an option is picked and at every calibration
+  # update. On Cleanest air, VOC Raw also checks every reading.
   # ----------------------------------------------------------
   - id: sync_voc_raw_zero
     then:
       - lambda: |-
-          if (!id(voc_raw_zero_auto).state)
-            return;
-          const float mean = id(voc_cal_mean).state;
-          if (isnan(mean))
-            return;
-          auto call = id(voc_raw_zero_offset).make_call();
-          call.set_value(roundf(mean));
-          call.perform();
+          const auto mode = id(voc_raw_zero_sync).current_option();
+          if (mode == "VOC Mean") {
+            const float mean = id(voc_cal_mean).state;
+            if (isnan(mean))
+              return;
+            auto call = id(voc_raw_zero_offset).make_call();
+            call.set_value(roundf(mean));
+            call.perform();
+          } else if (mode == "Cleanest air") {
+            if (isnan(id(sen6x_voc_raw).get_raw_state()))
+              return;
+            if (isnan(id(voc_raw_zero)) || id(sen6x_voc_raw).state < 0)
+              id(voc_raw_set_zero).press();
+          }
 
   # ----------------------------------------------------------
   # FAN CLEAN CYCLE
