@@ -1373,18 +1373,18 @@ select:
   # VOC RAW ZERO OFFSET SYNC  —  how the zero offset moves on
   # its own
   #
-  #   Cleanest air   whenever VOC Raw drops below 0 (air
-  #                  cleaner than at the zero), SEN - VOC Raw
-  #                  Set Zero is pressed, so the zero sits at
-  #                  the cleanest air seen and VOC Raw stays at
-  #                  0 or above. It only ever moves towards
+  #   Cleanest air   (default) whenever VOC Raw drops below 0
+  #                  (air cleaner than at the zero), SEN - VOC
+  #                  Raw Set Zero is pressed, so the zero sits
+  #                  at the cleanest air seen and VOC Raw stays
+  #                  at 0 or above. It only ever moves towards
   #                  cleaner air: press Set Zero, or pick
   #                  another option, to bring it back.
   #   VOC Mean       follows SEN - VOC Mean at every
   #                  calibration update (each read and save),
   #                  so VOC Raw reads 0 at the air the
   #                  algorithm counts as normal.
-  #   Off            never moves on its own (default).
+  #   Off            never moves on its own.
   #
   # Applies as soon as it is picked. Kept across restarts.
   # ----------------------------------------------------------
@@ -1397,7 +1397,7 @@ select:
       - "Cleanest air"
       - "VOC Mean"
       - "Off"
-    initial_option: "Off"
+    initial_option: "Cleanest air"
     optimistic: true
     restore_value: true
     on_value:
