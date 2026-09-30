@@ -65,6 +65,7 @@ esphome:
 
     - priority: -100
       then:
+        - script.execute: voc_raw_zero_warmup
         - script.execute: update_led_brightness
         - delay: 1s
         - script.execute: update_status_led
@@ -259,6 +260,13 @@ globals:
     restore_value: yes
     initial_value: 'NAN'
 
+  # True while the sensor settles after a (re)start, which
+  # holds off Cleanest air; see VOC RAW ZERO WARM-UP
+  - id: voc_raw_zero_warming
+    type: bool
+    restore_value: no
+    initial_value: 'true'
+
 # ============================================================
 # SENSORS
 # ============================================================
@@ -409,11 +417,13 @@ sensor:
             state: !lambda 'return x;'
       # SEN - VOC Raw Zero Offset Sync on Cleanest air: below 0
       # means cleaner air than the zero, so take a new zero
+      # (not while the sensor is warming up)
       on_value:
         - if:
             condition:
               lambda: |-
                 return id(voc_raw_zero_sync).current_option() == "Cleanest air" &&
+                       !id(voc_raw_zero_warming) &&
                        (x < 0 || isnan(id(voc_raw_zero)));
             then:
               - button.press: voc_raw_set_zero
@@ -812,10 +822,16 @@ button:
       name: "SEN - VOC Baseline Restore"
       entity_category: diagnostic
       internal: true
+      on_press:
+        then:
+          - script.execute: voc_raw_zero_warmup
     reset_voc_algorithm:
       name: "SEN - VOC Baseline Reset"
       entity_category: diagnostic
       internal: true
+      on_press:
+        then:
+          - script.execute: voc_raw_zero_warmup
 
   # ----------------------------------------------------------
   # VOC RAW SET ZERO
@@ -1379,7 +1395,11 @@ select:
   #                  at the cleanest air seen and VOC Raw stays
   #                  at 0 or above. It only ever moves towards
   #                  cleaner air: press Set Zero, or pick
-  #                  another option, to bring it back.
+  #                  another option, to bring it back. Held
+  #                  off for 10 min after a boot, a fan clean
+  #                  or a VOC baseline restore or reset, so a
+  #                  reading that has not settled yet cannot
+  #                  become the zero.
   #   VOC Mean       follows SEN - VOC Mean at every
   #                  calibration update (each read and save),
   #                  so VOC Raw reads 0 at the air the
@@ -1757,11 +1777,27 @@ script:
             call.set_value(roundf(mean));
             call.perform();
           } else if (mode == "Cleanest air") {
-            if (isnan(id(sen6x_voc_raw).get_raw_state()))
+            if (id(voc_raw_zero_warming) || isnan(id(sen6x_voc_raw).get_raw_state()))
               return;
             if (isnan(id(voc_raw_zero)) || id(sen6x_voc_raw).state < 0)
               id(voc_raw_set_zero).press();
           }
+
+  # ----------------------------------------------------------
+  # VOC RAW ZERO WARM-UP
+  #
+  # Holds off Cleanest air for 10 min after the measurement
+  # (re)starts, then catches up at once. Started at boot and
+  # again by a fan clean or a VOC baseline restore or reset;
+  # restart mode means a new start extends the hold.
+  # ----------------------------------------------------------
+  - id: voc_raw_zero_warmup
+    mode: restart
+    then:
+      - lambda: 'id(voc_raw_zero_warming) = true;'
+      - delay: 10min
+      - lambda: 'id(voc_raw_zero_warming) = false;'
+      - script.execute: sync_voc_raw_zero
 
   # ----------------------------------------------------------
   # FAN CLEAN CYCLE
@@ -1792,6 +1828,7 @@ script:
       - sen6x.start_fan_cleaning: sen6x_dev
       - delay: 11s
       - sen6x.start_measurement: sen6x_dev
+      - script.execute: voc_raw_zero_warmup
       # Release the switch: the sensor is measuring again, even
       # though values stay held back for the startup delay.
       - switch.turn_off: fan_clean
