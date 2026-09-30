@@ -397,36 +397,25 @@ sensor:
         gating_max_duration_minutes: ${voc_gating_max_duration_minutes}
         learning_time_offset_hours: ${voc_learning_time_offset_hours}
         learning_time_gain_hours: ${voc_learning_time_gain_hours}
+    # The raw VOC reading in ticks, before SEN - VOC Raw Zero
+    # Offset is applied, averaged over the last 30 s (3 readings
+    # at the 10 s sample interval) to take the noise out. A
+    # change starts to show at the next reading and is fully
+    # in within 30 s. VOC Raw, SEN - VOC Raw Set Zero and the
+    # Cleanest air sync all work from this average, so
+    # comparing it with the offset shows how far the signal has
+    # drifted since the zero was set. Named to sit next to the
+    # offset in HA's Diagnostic list.
     raw_voc:
-      id: sen6x_voc_raw
-      name: "VOC Raw"
-      # The sensor's raw VOC signal, updated with the VOC Index.
-      # Shown as SEN - VOC Raw Zero Offset minus the reading, so
-      # it reads 0 at the offset and rises as VOCs rise. Until
-      # an offset has been set it shows 65535 minus the reading.
+      id: sen6x_voc_raw_reading
+      name: "SEN - VOC Raw Value (pre-offset)"
+      entity_category: diagnostic
       filters:
-        - lambda: |-
-            if (isnan(id(voc_raw_zero)))
-              return 65535.0f - x;
-            return id(voc_raw_zero) - x;
-      # The reading before the offset, for SEN - VOC Raw Value
-      # (pre-offset)
-      on_raw_value:
-        - sensor.template.publish:
-            id: voc_raw_value
-            state: !lambda 'return x;'
-      # SEN - VOC Raw Zero Offset Sync on Cleanest air: below 0
-      # means cleaner air than the zero, so take a new zero
-      # (not while the sensor is warming up)
+        - sliding_window_moving_average:
+            window_size: 3
+            send_every: 1
       on_value:
-        - if:
-            condition:
-              lambda: |-
-                return id(voc_raw_zero_sync).current_option() == "Cleanest air" &&
-                       !id(voc_raw_zero_warming) &&
-                       (x < 0 || isnan(id(voc_raw_zero)));
-            then:
-              - button.press: voc_raw_set_zero
+        - component.update: sen6x_voc_raw
     nox_index:
       id: sen6x_nox
       name: "NOx Index"
@@ -749,24 +738,39 @@ sensor:
     update_interval: never
 
   # ----------------------------------------------------------
-  # VOC RAW VALUE (PRE-OFFSET)
+  # VOC RAW
   #
-  # The raw VOC reading in ticks, before SEN - VOC Raw Zero
-  # Offset is applied, updated with VOC Raw. It is the value
-  # SEN - VOC Raw Set Zero takes, so comparing it with the
-  # offset shows how far the signal has drifted since the zero
-  # was set. Named to sit next to the offset in HA's
-  # Diagnostic list.
+  # The raw VOC signal, from the 30 s average in SEN - VOC Raw
+  # Value (pre-offset) and updated with it. Shown as SEN - VOC
+  # Raw Zero Offset minus the reading, so it reads 0 at the
+  # offset and rises as VOCs rise. Until an offset has been
+  # set it shows 65535 minus the reading.
   # ----------------------------------------------------------
   - platform: template
-    id: voc_raw_value
-    name: "SEN - VOC Raw Value (pre-offset)"
+    id: sen6x_voc_raw
+    name: "VOC Raw"
     icon: mdi:radiator
-    entity_category: diagnostic
     unit_of_measurement: ticks
     accuracy_decimals: 0
     state_class: measurement
     update_interval: never
+    lambda: |-
+      const float reading = id(sen6x_voc_raw_reading).state;
+      if (isnan(id(voc_raw_zero)))
+        return 65535.0f - reading;
+      return id(voc_raw_zero) - reading;
+    # SEN - VOC Raw Zero Offset Sync on Cleanest air: below 0
+    # means cleaner air than the zero, so take a new zero (not
+    # while the sensor is warming up)
+    on_value:
+      - if:
+          condition:
+            lambda: |-
+              return id(voc_raw_zero_sync).current_option() == "Cleanest air" &&
+                     !id(voc_raw_zero_warming) &&
+                     (x < 0 || isnan(id(voc_raw_zero)));
+          then:
+            - button.press: voc_raw_set_zero
 
 # ============================================================
 # BUTTONS
@@ -836,7 +840,8 @@ button:
   # ----------------------------------------------------------
   # VOC RAW SET ZERO
   #
-  # Sets SEN - VOC Raw Zero Offset to the current raw VOC
+  # Sets SEN - VOC Raw Zero Offset to SEN - VOC Raw Value
+  # (pre-offset), the current 30 s average of the raw VOC
   # reading, so VOC Raw reads 0 from here. Press again to take
   # a new one. Does nothing before the first reading after
   # boot. SEN - VOC Raw Zero Offset Sync presses it on its own
@@ -851,7 +856,7 @@ button:
     on_press:
       then:
         - lambda: |-
-            const float raw = id(sen6x_voc_raw).get_raw_state();
+            const float raw = id(sen6x_voc_raw_reading).state;
             if (isnan(raw)) {
               ESP_LOGW("voc_raw", "No raw VOC reading yet; zero not set");
               return;
@@ -1375,9 +1380,8 @@ number:
           id(voc_raw_zero_offset).publish_state(x);
           // Show VOC Raw against the new offset now rather than
           // at the next update
-          const float raw = id(sen6x_voc_raw).get_raw_state();
-          if (!isnan(raw))
-            id(sen6x_voc_raw).publish_state(raw);
+          if (!isnan(id(sen6x_voc_raw_reading).state))
+            id(sen6x_voc_raw).update();
 
 # ============================================================
 # SELECTS
@@ -1777,7 +1781,7 @@ script:
             call.set_value(roundf(mean));
             call.perform();
           } else if (mode == "Cleanest air") {
-            if (id(voc_raw_zero_warming) || isnan(id(sen6x_voc_raw).get_raw_state()))
+            if (id(voc_raw_zero_warming) || isnan(id(sen6x_voc_raw_reading).state))
               return;
             if (isnan(id(voc_raw_zero)) || id(sen6x_voc_raw).state < 0)
               id(voc_raw_set_zero).press();
