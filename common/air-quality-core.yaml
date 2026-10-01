@@ -20,6 +20,7 @@ substitutions:
   led_brightness_min_default: "20"
   led_brightness_max_lux_default: "400"
   voc_state_read_interval: 10min
+  voc_raw_zero_window_hours: "48"
 
 # ============================================================
 # EXTERNAL COMPONENTS
@@ -65,14 +66,14 @@ esphome:
 
     - priority: -100
       then:
-        # Cleanest air (48 h) history as saved at the last full
+        # Cleanest air (N h) history as saved at the last full
         # hour. On the first start with no history yet, the zero
         # already in use seeds the current hour, so picking
-        # Cleanest air (48 h) does not drop it; it ages out after
-        # 48 hours like any other hour.
+        # Cleanest air (N h) does not drop it; it ages out after
+        # the window like any other hour.
         - lambda: |-
             memcpy(id(voc_raw_best_hours), id(voc_raw_best_saved), sizeof(id(voc_raw_best_hours)));
-            if (id(voc_raw_best_slot) >= 48)
+            if (id(voc_raw_best_slot) >= ${voc_raw_zero_window_hours})
               id(voc_raw_best_slot) = 0;
             bool empty = true;
             for (float v : id(voc_raw_best_hours))
@@ -283,17 +284,17 @@ globals:
     restore_value: no
     initial_value: 'true'
 
-  # Cleanest air (48 h): the cleanest (highest) 30 s average
-  # raw VOC reading of each of the last 48 hours, 0 = none yet.
-  # voc_raw_best_slot is the current hour. The saved copy is
-  # written once an hour (see INTERVALS) and read back at boot,
-  # so a restart carries on as if no time had passed. Seeded
-  # once from the zero in use (see on_boot).
+  # Cleanest air (N h): the cleanest (highest) 30 s average
+  # raw VOC reading of each of the last voc_raw_zero_window_hours
+  # hours, 0 = none yet. voc_raw_best_slot is the current hour.
+  # The saved copy is written once an hour (see INTERVALS) and
+  # read back at boot, so a restart carries on as if no time
+  # had passed. Seeded once from the zero in use (see on_boot).
   - id: voc_raw_best_hours
-    type: float[48]
+    type: float[${voc_raw_zero_window_hours}]
     restore_value: no
   - id: voc_raw_best_saved
-    type: float[48]
+    type: float[${voc_raw_zero_window_hours}]
     restore_value: yes
   - id: voc_raw_best_slot
     type: uint8_t
@@ -449,7 +450,7 @@ sensor:
             send_every: 1
       on_value:
         # Keep this hour's cleanest reading for Cleanest air
-        # (48 h), whichever sync option is picked, so the history
+        # (N h), whichever sync option is picked, so the history
         # is there when it is chosen (not while warming up)
         - lambda: |-
             if (!id(voc_raw_zero_warming) && !isnan(x)) {
@@ -461,8 +462,8 @@ sensor:
         # reading above the zero is cleaner air, so it becomes the
         # new zero before VOC Raw is published, and VOC Raw never
         # shows the negative value (not while warming up). On
-        # Cleanest air (48 h) the zero is put on the 48-hour best
-        # first, for the same reason.
+        # Cleanest air (N h) the zero is put on the best of the
+        # window first, for the same reason.
         - if:
             condition:
               lambda: |-
@@ -475,7 +476,7 @@ sensor:
             else:
               - if:
                   condition:
-                    lambda: 'return id(voc_raw_zero_sync).current_option() == "Cleanest air (48 h)";'
+                    lambda: 'return id(voc_raw_zero_sync).current_option() == "Cleanest air (${voc_raw_zero_window_hours} h)";'
                   then:
                     - script.execute: sync_voc_raw_zero
               - component.update: sen6x_voc_raw
@@ -897,7 +898,7 @@ button:
   # a new one. Does nothing before the first reading after
   # boot. SEN - VOC Raw Zero Offset Sync presses it on its own
   # on Cleanest air; on VOC Mean the next calibration update,
-  # and on Cleanest air (48 h) the next reading, replaces what
+  # and on Cleanest air (N h) the next reading, replaces what
   # it set.
   # ----------------------------------------------------------
   - platform: template
@@ -1461,13 +1462,14 @@ select:
   #                  calibration update (each read and save),
   #                  so VOC Raw reads 0 at the air the
   #                  algorithm counts as normal.
-  #   Cleanest air (48 h)
+  #   Cleanest air (N h)
   #                  the zero is the cleanest reading of the
-  #                  last 48 hours, kept per hour, so it moves
-  #                  up with cleaner air and back down as old
-  #                  clean hours drop out. VOC Raw stays at 0
-  #                  or above; readings during a warm-up are
-  #                  not counted.
+  #                  last N hours (voc_raw_zero_window_hours,
+  #                  48 unless the device file sets it), kept
+  #                  per hour, so it moves up with cleaner air
+  #                  and back down as old clean hours drop out.
+  #                  VOC Raw stays at 0 or above; readings
+  #                  during a warm-up are not counted.
   #   Off            never moves on its own.
   #
   # Applies as soon as it is picked. Kept across restarts.
@@ -1480,7 +1482,7 @@ select:
     options:
       - "Cleanest air"
       - "VOC Mean"
-      - "Cleanest air (48 h)"
+      - "Cleanest air (${voc_raw_zero_window_hours} h)"
       - "Off"
     initial_option: "Cleanest air"
     optimistic: true
@@ -1756,17 +1758,17 @@ interval:
       - sen6x.read_voc_state: sen6x_dev
 
   # ----------------------------------------------------------
-  # CLEANEST AIR (48 H) HOUR
+  # CLEANEST AIR (N H) HOUR
   #
-  # Starts a new hour in the 48-hour history, dropping the
-  # oldest, and saves the history: the only flash write it
-  # makes. First tick one hour after boot.
+  # Starts a new hour in the Cleanest air (N h) history,
+  # dropping the oldest, and saves the history: the only flash
+  # write it makes. First tick one hour after boot.
   # ----------------------------------------------------------
   - interval: 1h
     startup_delay: 1h
     then:
       - lambda: |-
-          id(voc_raw_best_slot) = (id(voc_raw_best_slot) + 1) % 48;
+          id(voc_raw_best_slot) = (id(voc_raw_best_slot) + 1) % ${voc_raw_zero_window_hours};
           id(voc_raw_best_hours)[id(voc_raw_best_slot)] = 0;
           memcpy(id(voc_raw_best_saved), id(voc_raw_best_hours), sizeof(id(voc_raw_best_saved)));
       - script.execute: sync_voc_raw_zero
@@ -1863,7 +1865,7 @@ script:
               return;
             if (isnan(id(voc_raw_zero)) || id(sen6x_voc_raw_reading).state > id(voc_raw_zero))
               id(voc_raw_set_zero).press();
-          } else if (mode == "Cleanest air (48 h)") {
+          } else if (mode == "Cleanest air (${voc_raw_zero_window_hours} h)") {
             float best = 0;
             for (float v : id(voc_raw_best_hours))
               if (v > best)

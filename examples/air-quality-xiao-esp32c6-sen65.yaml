@@ -163,6 +163,14 @@ substitutions:
   #
   voc_state_read_interval: 10min
 
+  # --- VOC RAW ZERO WINDOW ----------------------------------
+  #
+  # How many hours SEN - VOC Raw Zero Offset Sync looks back
+  # over on its "Cleanest air (N h)" option, 1 to 255.
+  # Changing it starts that history over.
+  #
+  voc_raw_zero_window_hours: "48"
+
   # --- LIGHT SENSOR -----------------------------------------
   #
   # With LED - Ambient Light Control on, the LED only lights
