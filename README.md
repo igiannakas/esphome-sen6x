@@ -127,7 +127,8 @@ sensor:
 `raw_voc` is the VOC sensor's raw signal (SRAW_VOC, 0–65535 ticks, datasheet 4.8.11 / 4.8.12),
 the value the VOC Index is worked out from. It is read in the same update as the index, so it
 publishes at the same rate. It falls as VOCs rise; `65535.0 - x` mirrors it within its range so a
-graph of it moves the same way as the index and stays positive.
+graph of it moves the same way as the index and stays positive. The example node measures it
+from a zero you set instead; see [VOC Raw](#voc-raw).
 
 ### Device status
 
@@ -224,15 +225,85 @@ save, once during setup from the stored copy, and when a reset clears it.
 
 ## Examples
 
-`examples/air-quality-xiao-esp32c6-sen66.yaml` is a complete air-quality node (XIAO ESP32-C6,
-SEN66 + VEML7700, status LED, open-window detection, VOC state persistence); the `-sen65` variant
-is the same node on a part without CO2. Wi-Fi credentials come from a `secrets.yaml` next to the
-file (`secrets.yaml.example`).
+`examples/air-quality-xiao-esp32c6-sen66.yaml` is a complete air-quality node: a XIAO ESP32-C6
+with a SEN66 and a VEML7700 light sensor. The `-sen65` variant is the same node on a part without
+CO2. Wi-Fi credentials come from a `secrets.yaml` next to the file (`secrets.yaml.example`).
 
-Each air-quality node is two files. The node file holds the settings: its `substitutions:` and,
-on a SEN66, the CO2 block. The logic both nodes share is in `common/air-quality-core.yaml`,
-which the node file fetches from this repository on GitHub under `packages:` every time it is
-built. The node file and `secrets.yaml` are all you need locally.
+Each node is two files. The node file holds the settings: its `substitutions:` and, on a SEN66,
+the CO2 block. The logic both nodes share is in `common/air-quality-core.yaml`, which the node
+file fetches from this repository on GitHub under `packages:` every time it is built. The node
+file and `secrets.yaml` are all you need locally.
+
+What the node does:
+
+- **Status LED** — green, amber or red for the worst of CO2, PM, VOC and NOx against the levels in
+  the node file, flashing for "ventilate" and sensor faults, breathing while a window is open.
+  With LED - Ambient Light Control on, it dims with the room and stays off in the dark.
+- **Open-window detection** — Open Window Detected comes on when the room cools quickly and goes
+  off when it warms back up. Detection pauses while sun is warming the board.
+- **VOC baseline** — saved to flash every `voc_state_save_interval` and on SEN - VOC Baseline Save,
+  and handed back at boot. SEN - VOC Mean, Std Dev and Sensitivity show what the sensor has
+  learned, refreshed every `voc_state_read_interval`.
+- **VOC Raw** — the raw VOC signal measured from a zero you set; see below.
+
+ESP - Uptime, ESP - Temperature, ESP - WiFi Signal and LED - Brightness start disabled in Home
+Assistant; enable them there to see them.
+
+### VOC Raw
+
+VOC Raw is SEN - VOC Raw Zero Offset minus the raw VOC reading averaged over 30 s, so it reads 0
+at the zero and rises as VOCs rise. SEN - VOC Raw Value (pre-offset) is that average before the
+zero is taken off; compare it with the offset to see how far the signal has drifted.
+
+SEN - VOC Raw Set Zero sets the zero to the current reading, or type one into SEN - VOC Raw Zero
+Offset. The zero is kept across restarts. SEN - VOC Raw Zero Offset Sync decides how it moves on
+its own:
+
+| Option | The zero |
+|---|---|
+| Cleanest air | the cleanest reading seen; it only moves towards cleaner air |
+| VOC Mean | follows SEN - VOC Mean, the air the sensor counts as normal |
+| Cleanest air (N h) | the cleanest reading of the last `voc_raw_zero_window_hours` hours |
+| Cleanest air (N h) + airing reset | as Cleanest air (N h), and when a window is opened and the air gets cleaner than just before, the zero and its history start again from the airing (default) |
+| Off | moves only when you set it |
+
+On the Cleanest air options VOC Raw stays at 0 or above. For 10 minutes after a restart, a fan
+clean or a VOC baseline restore or reset, readings are not used while the sensor settles, and VOC
+Raw can dip below 0. On the two N h options, Set Zero also clears the history and starts it again
+from the current reading.
+
+SEN - VOC Raw Zero Offset Log shows the last thing that happened to the zero, with the time: each
+move, from and to, and what made it. Home Assistant's history keeps the earlier entries.
+
+### Node settings
+
+Each block in the node file's `substitutions:` is described where it is set. Values ending
+`_default` only set a starting value in Home Assistant; once the node has booted, change them
+there.
+
+| Block | Settings | Example |
+|---|---|---|
+| SENSOR MODEL | `sen_model`, `co2_state`, `co2_fault` | SEN66 |
+| DEVICE | `device_name`, `friendly_name` | |
+| NETWORK | `wifi_ssid`, `wifi_password` | from `secrets.yaml` |
+| PINS | `pin_sda`, `pin_scl`, `pin_status_led` | D4, D5, D1 |
+| SEN6x | `sen6x_sample_interval`, `sen6x_temp_offset`, `sen6x_timeout_ms` | 10s, -0.30, 60000 |
+| AIR QUALITY LEVELS | `co2_l1` … `nox_l3` | |
+| VOC LEARNING | `voc_gating_max_duration_minutes`, `voc_learning_time_offset_hours`, `voc_learning_time_gain_hours` | 720, 24, 24 |
+| OPEN WINDOW DETECTION | `temp_rate_interval_s`, `temp_rate_window` | 30, 6 |
+| | `window_open_rate_default`, `window_close_rate_default` | -0.07, 0.02 °C/min |
+| | `window_open_samples`, `window_close_samples`, `window_max_hold_default_min` | 2, 4, 60 |
+| SUN LOCKOUT | `sun_lockout_lux_default`, `sun_lockout_minutes_default`, `heat_spike_rate_default`, `window_settle_samples` | 1000, 45, 0.30, 3 |
+| VOC BASELINE SAVE | `voc_state_save_interval` | 6h |
+| VOC CALIBRATION READ | `voc_state_read_interval` | 10min |
+| VOC RAW ZERO WINDOW | `voc_raw_zero_window_hours`, 1 to 255 | 48 |
+| LIGHT SENSOR | `lux_sample_interval`, `lux_publish_min_gap`, `lux_publish_delta`, `lux_publish_heartbeat`, `dark_room_threshold_default` | 2s, 4s, 10%, 300s, 1 |
+| STATUS LED | `led_brightness_max_default`, `led_brightness_min_default`, `led_brightness_max_lux_default` | 100, 20, 400 |
+| | `led_flash_on`, `led_flash_off`, `led_breathe_step`, `led_breathe_fade` | 200ms, 800ms, 2000ms, 1800ms |
+| DIAGNOSTICS | `diag_interval` | 60s |
+
+`voc_state_read_interval`, `voc_raw_zero_window_hours` and the three `led_brightness_*_default`
+values may be left out; the core falls back to the values shown.
 
 ## Tests
 

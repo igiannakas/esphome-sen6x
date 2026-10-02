@@ -218,7 +218,8 @@ substitutions:
   # --- DIAGNOSTICS ------------------------------------------
   #
   # How often Wi-Fi signal, uptime and chip temperature are
-  # reported.
+  # reported. They start disabled in Home Assistant, as does
+  # LED - Brightness; enable them there to see them.
   #
   diag_interval: 60s
 
