@@ -301,6 +301,26 @@ globals:
     restore_value: yes
     initial_value: '0'
 
+  # Cleanest air (N h) + airing reset: the raw VOC reading at
+  # each Window - Temperature Rate update, 0 = none or warming
+  # up. It reaches back the rate span, the open samples and two
+  # more readings (5 min with the example settings), so the
+  # oldest is from before the room started cooling.
+  - id: voc_raw_airing_hist
+    type: float[${temp_rate_window} + ${window_open_samples} + 3]
+    restore_value: no
+  - id: voc_raw_airing_idx
+    type: uint8_t
+    restore_value: no
+    initial_value: '0'
+
+  # The reading from before the window opened, while waiting
+  # for the air to get cleaner than it. NAN = not waiting.
+  - id: voc_raw_airing_ref
+    type: float
+    restore_value: no
+    initial_value: 'NAN'
+
 # ============================================================
 # SENSORS
 # ============================================================
@@ -463,7 +483,10 @@ sensor:
         # new zero before VOC Raw is published, and VOC Raw never
         # shows the negative value (not while warming up). On
         # Cleanest air (N h) the zero is put on the best of the
-        # window first, for the same reason.
+        # window first, for the same reason. On Cleanest air (N h)
+        # + airing reset, the first reading since the window
+        # opened that is cleaner than the one from before it
+        # presses Set Zero, once per airing.
         - if:
             condition:
               lambda: |-
@@ -476,10 +499,24 @@ sensor:
             else:
               - if:
                   condition:
-                    lambda: 'return id(voc_raw_zero_sync).current_option() == "Cleanest air (${voc_raw_zero_window_hours} h)";'
+                    lambda: |-
+                      return id(voc_raw_zero_sync).current_option() == "Cleanest air (${voc_raw_zero_window_hours} h) + airing reset" &&
+                             !id(voc_raw_zero_warming) && x > id(voc_raw_airing_ref);
                   then:
-                    - script.execute: sync_voc_raw_zero
-              - component.update: sen6x_voc_raw
+                    - lambda: |-
+                        ESP_LOGI("voc_raw", "Airing: %.0f ticks is cleaner than %.0f before the window opened", x, id(voc_raw_airing_ref));
+                        id(voc_raw_airing_ref) = NAN;
+                    - button.press: voc_raw_set_zero
+                  else:
+                    - if:
+                        condition:
+                          lambda: |-
+                            const auto mode = id(voc_raw_zero_sync).current_option();
+                            return mode == "Cleanest air (${voc_raw_zero_window_hours} h)" ||
+                                   mode == "Cleanest air (${voc_raw_zero_window_hours} h) + airing reset";
+                        then:
+                          - script.execute: sync_voc_raw_zero
+                    - component.update: sen6x_voc_raw
     nox_index:
       id: sen6x_nox
       name: "NOx Index"
@@ -607,6 +644,14 @@ sensor:
     # edge is armed at a time, so the two runs never fight.
     on_value:
       then:
+        # The raw VOC reading for Cleanest air (N h) + airing
+        # reset, kept at every update, before the latch can close
+        - lambda: |-
+            const uint8_t n = sizeof(id(voc_raw_airing_hist)) / sizeof(id(voc_raw_airing_hist)[0]);
+            const float raw = id(sen6x_voc_raw_reading).state;
+            id(voc_raw_airing_hist)[id(voc_raw_airing_idx)] =
+                (id(voc_raw_zero_warming) || isnan(raw)) ? 0 : raw;
+            id(voc_raw_airing_idx) = (id(voc_raw_airing_idx) + 1) % n;
         - lambda: |-
             if (isnan(x)) {
               return;
@@ -898,9 +943,10 @@ button:
   # a new one. Does nothing before the first reading after
   # boot. SEN - VOC Raw Zero Offset Sync presses it on its own
   # on Cleanest air, and on VOC Mean the next calibration
-  # update replaces what it set. On Cleanest air (N h) it also
-  # clears that history and starts it again from this reading,
-  # so the zero stays here until cleaner air comes along.
+  # update replaces what it set. On both Cleanest air (N h)
+  # options it also clears that history and starts it again
+  # from this reading, so the zero stays here until cleaner air
+  # comes along.
   # ----------------------------------------------------------
   - platform: template
     id: voc_raw_set_zero
@@ -920,7 +966,9 @@ button:
             // the window's best, so its history starts over from here.
             // Saved at once, so a restart does not bring the old
             // history back.
-            if (id(voc_raw_zero_sync).current_option() == "Cleanest air (${voc_raw_zero_window_hours} h)") {
+            const auto mode = id(voc_raw_zero_sync).current_option();
+            if (mode == "Cleanest air (${voc_raw_zero_window_hours} h)" ||
+                mode == "Cleanest air (${voc_raw_zero_window_hours} h) + airing reset") {
               for (float &v : id(voc_raw_best_hours))
                 v = 0;
               id(voc_raw_best_hours)[id(voc_raw_best_slot)] = raw;
@@ -1050,6 +1098,24 @@ binary_sensor:
     on_state:
       then:
         - script.execute: update_status_led
+    # Cleanest air (N h) + airing reset: the oldest reading kept
+    # by the rate sensor is the one to beat (see voc_raw_airing_hist)
+    on_press:
+      then:
+        - lambda: |-
+            if (id(voc_raw_zero_sync).current_option() != "Cleanest air (${voc_raw_zero_window_hours} h) + airing reset" ||
+                id(voc_raw_zero_warming))
+              return;
+            const float ref = id(voc_raw_airing_hist)[id(voc_raw_airing_idx)];
+            if (ref <= 0) {
+              ESP_LOGI("voc_raw", "Airing: no reading from before the window opened; no reset");
+              return;
+            }
+            id(voc_raw_airing_ref) = ref;
+            ESP_LOGI("voc_raw", "Airing: zero resets once the air is cleaner than %.0f ticks", ref);
+    on_release:
+      then:
+        - lambda: 'id(voc_raw_airing_ref) = NAN;'
 
   # ----------------------------------------------------------
   # SUN LOCKOUT ACTIVE
@@ -1458,7 +1524,7 @@ select:
   # VOC RAW ZERO OFFSET SYNC  —  how the zero offset moves on
   # its own
   #
-  #   Cleanest air   (default) whenever a reading would put
+  #   Cleanest air   whenever a reading would put
   #                  VOC Raw below 0 (air cleaner than at the
   #                  zero), SEN - VOC Raw Set Zero is pressed
   #                  first, so the zero sits at the cleanest
@@ -1484,6 +1550,16 @@ select:
   #                  during a warm-up are not counted. SEN -
   #                  VOC Raw Set Zero clears the history and
   #                  starts it again from the current reading.
+  #   Cleanest air (N h) + airing reset
+  #                  (default) as Cleanest air (N h), and
+  #                  once Open Window Detected comes on, the
+  #                  first reading cleaner than the one from
+  #                  just before the window opened presses
+  #                  SEN - VOC Raw Set Zero, once per airing.
+  #                  The zero then follows the airing's
+  #                  cleanest air. If the air never gets
+  #                  cleaner before the window is shut,
+  #                  nothing is reset. Not during a warm-up.
   #   Off            never moves on its own.
   #
   # Applies as soon as it is picked. Kept across restarts.
@@ -1497,8 +1573,9 @@ select:
       - "Cleanest air"
       - "VOC Mean"
       - "Cleanest air (${voc_raw_zero_window_hours} h)"
+      - "Cleanest air (${voc_raw_zero_window_hours} h) + airing reset"
       - "Off"
-    initial_option: "Cleanest air"
+    initial_option: "Cleanest air (${voc_raw_zero_window_hours} h) + airing reset"
     optimistic: true
     restore_value: true
     on_value:
@@ -1879,7 +1956,8 @@ script:
               return;
             if (isnan(id(voc_raw_zero)) || id(sen6x_voc_raw_reading).state > id(voc_raw_zero))
               id(voc_raw_set_zero).press();
-          } else if (mode == "Cleanest air (${voc_raw_zero_window_hours} h)") {
+          } else if (mode == "Cleanest air (${voc_raw_zero_window_hours} h)" ||
+                     mode == "Cleanest air (${voc_raw_zero_window_hours} h) + airing reset") {
             float best = 0;
             for (float v : id(voc_raw_best_hours))
               if (v > best)

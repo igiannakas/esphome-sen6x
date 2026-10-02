@@ -165,7 +165,7 @@ substitutions:
   # --- VOC RAW ZERO WINDOW ----------------------------------
   #
   # How many hours SEN - VOC Raw Zero Offset Sync looks back
-  # over on its "Cleanest air (N h)" option, 1 to 255.
+  # over on its "Cleanest air (N h)" options, 1 to 255.
   # Changing it starts that history over.
   #
   voc_raw_zero_window_hours: "48"
