@@ -116,6 +116,11 @@ logger:
 
 api:
 
+# Clock for SEN - VOC Raw Zero Offset Log, from HA
+time:
+  - platform: homeassistant
+    id: ha_time
+
 # No VOC baseline save here: the only automatic save is the
 # interval under INTERVALS.
 ota:
@@ -321,6 +326,13 @@ globals:
     restore_value: no
     initial_value: 'NAN'
 
+  # What is about to move SEN - VOC Raw Zero Offset, for SEN -
+  # VOC Raw Zero Offset Log. Empty = typed in.
+  - id: voc_raw_zero_cause
+    type: std::string
+    restore_value: no
+    initial_value: '""'
+
 # ============================================================
 # SENSORS
 # ============================================================
@@ -495,6 +507,7 @@ sensor:
                        (isnan(id(voc_raw_zero)) || x > id(voc_raw_zero));
             then:
               # Set Zero publishes VOC Raw itself, at 0
+              - lambda: 'id(voc_raw_zero_cause) = "Cleanest air";'
               - button.press: voc_raw_set_zero
             else:
               - if:
@@ -504,8 +517,8 @@ sensor:
                              !id(voc_raw_zero_warming) && x > id(voc_raw_airing_ref);
                   then:
                     - lambda: |-
-                        ESP_LOGI("voc_raw", "Airing: %.0f ticks is cleaner than %.0f before the window opened", x, id(voc_raw_airing_ref));
                         id(voc_raw_airing_ref) = NAN;
+                        id(voc_raw_zero_cause) = "Airing reset";
                     - button.press: voc_raw_set_zero
                   else:
                     - if:
@@ -959,9 +972,12 @@ button:
             const float raw = id(sen6x_voc_raw_reading).state;
             if (isnan(raw)) {
               ESP_LOGW("voc_raw", "No raw VOC reading yet; zero not set");
+              id(voc_raw_zero_cause).clear();
               return;
             }
-            ESP_LOGI("voc_raw", "Zero set at %.0f ticks", raw);
+            // Pressed by hand, unless a sync option set the cause
+            if (id(voc_raw_zero_cause).empty())
+              id(voc_raw_zero_cause) = "Set Zero";
             // Cleanest air (N h) would put the zero straight back on
             // the window's best, so its history starts over from here.
             // Saved at once, so a restart does not bring the old
@@ -973,7 +989,7 @@ button:
                 v = 0;
               id(voc_raw_best_hours)[id(voc_raw_best_slot)] = raw;
               memcpy(id(voc_raw_best_saved), id(voc_raw_best_hours), sizeof(id(voc_raw_best_saved)));
-              ESP_LOGI("voc_raw", "Cleanest air history cleared");
+              id(voc_raw_zero_cause) += " (history cleared)";
             }
             auto call = id(voc_raw_zero_offset).make_call();
             call.set_value(raw);
@@ -1103,19 +1119,31 @@ binary_sensor:
     on_press:
       then:
         - lambda: |-
-            if (id(voc_raw_zero_sync).current_option() != "Cleanest air (${voc_raw_zero_window_hours} h) + airing reset" ||
-                id(voc_raw_zero_warming))
+            if (id(voc_raw_zero_sync).current_option() != "Cleanest air (${voc_raw_zero_window_hours} h) + airing reset")
               return;
+            if (id(voc_raw_zero_warming)) {
+              id(log_voc_raw_zero).execute("Window open during warm-up: no reset");
+              return;
+            }
             const float ref = id(voc_raw_airing_hist)[id(voc_raw_airing_idx)];
             if (ref <= 0) {
-              ESP_LOGI("voc_raw", "Airing: no reading from before the window opened; no reset");
+              id(log_voc_raw_zero).execute("Window open, no reading from before it: no reset");
               return;
             }
             id(voc_raw_airing_ref) = ref;
-            ESP_LOGI("voc_raw", "Airing: zero resets once the air is cleaner than %.0f ticks", ref);
+            char buf[64];
+            snprintf(buf, sizeof(buf), "Window open: resets once cleaner than %.0f ticks", ref);
+            id(log_voc_raw_zero).execute(buf);
     on_release:
       then:
-        - lambda: 'id(voc_raw_airing_ref) = NAN;'
+        - lambda: |-
+            if (!isnan(id(voc_raw_airing_ref)) &&
+                id(voc_raw_zero_sync).current_option() == "Cleanest air (${voc_raw_zero_window_hours} h) + airing reset") {
+              char buf[64];
+              snprintf(buf, sizeof(buf), "Window shut, never cleaner than %.0f ticks: no reset", id(voc_raw_airing_ref));
+              id(log_voc_raw_zero).execute(buf);
+            }
+            id(voc_raw_airing_ref) = NAN;
 
   # ----------------------------------------------------------
   # SUN LOCKOUT ACTIVE
@@ -1285,6 +1313,23 @@ text_sensor:
       if (id(sen6x_pm_error).state)          add("PM");
 
       return faults.empty() ? std::string("OK") : faults;
+
+  # ----------------------------------------------------------
+  # SEN - VOC RAW ZERO OFFSET LOG
+  #
+  # The last thing that happened to SEN - VOC Raw Zero Offset,
+  # with the time: each move, from and to, and what made it —
+  # Set Zero, a typed value or the SEN - VOC Raw Zero Offset
+  # Sync option. Also each warm-up, and on Cleanest air (N h)
+  # + airing reset, each window opening and shutting. HA
+  # history keeps the earlier entries.
+  # ----------------------------------------------------------
+  - platform: template
+    id: voc_raw_zero_log
+    name: "SEN - VOC Raw Zero Offset Log"
+    icon: mdi:history
+    entity_category: diagnostic
+    update_interval: never
 
 # ============================================================
 # NUMBERS  —  live configuration from HA
@@ -1507,12 +1552,27 @@ number:
       return isnan(id(voc_raw_zero)) ? 65535.0f : id(voc_raw_zero);
     set_action:
       - lambda: |-
+          const float old = id(voc_raw_zero);
           id(voc_raw_zero) = x;
           id(voc_raw_zero_offset).publish_state(x);
           // Show VOC Raw against the new offset now rather than
           // at the next update
           if (!isnan(id(sen6x_voc_raw_reading).state))
             id(sen6x_voc_raw).update();
+          // SEN - VOC Raw Zero Offset Log, when it moved, or on
+          // any Set Zero
+          std::string cause = id(voc_raw_zero_cause);
+          id(voc_raw_zero_cause).clear();
+          if (cause.empty())
+            cause = "Typed in";
+          if (x == old && cause.rfind("Set Zero", 0) != 0)
+            return;
+          char buf[48];
+          if (isnan(old))
+            snprintf(buf, sizeof(buf), ": %.0f ticks", x);
+          else
+            snprintf(buf, sizeof(buf), ": %.0f ticks (was %.0f)", x, old);
+          id(log_voc_raw_zero).execute(cause + buf);
 
 # ============================================================
 # SELECTS
@@ -1948,14 +2008,17 @@ script:
             const float mean = id(voc_cal_mean).state;
             if (isnan(mean))
               return;
+            id(voc_raw_zero_cause) = "VOC Mean";
             auto call = id(voc_raw_zero_offset).make_call();
             call.set_value(roundf(mean));
             call.perform();
           } else if (mode == "Cleanest air") {
             if (id(voc_raw_zero_warming) || isnan(id(sen6x_voc_raw_reading).state))
               return;
-            if (isnan(id(voc_raw_zero)) || id(sen6x_voc_raw_reading).state > id(voc_raw_zero))
+            if (isnan(id(voc_raw_zero)) || id(sen6x_voc_raw_reading).state > id(voc_raw_zero)) {
+              id(voc_raw_zero_cause) = "Cleanest air";
               id(voc_raw_set_zero).press();
+            }
           } else if (mode == "Cleanest air (${voc_raw_zero_window_hours} h)" ||
                      mode == "Cleanest air (${voc_raw_zero_window_hours} h) + airing reset") {
             float best = 0;
@@ -1964,6 +2027,7 @@ script:
                 best = v;
             if (best <= 0 || best == id(voc_raw_zero))
               return;
+            id(voc_raw_zero_cause) = "Cleanest air (${voc_raw_zero_window_hours} h)";
             auto call = id(voc_raw_zero_offset).make_call();
             call.set_value(best);
             call.perform();
@@ -1980,10 +2044,30 @@ script:
   - id: voc_raw_zero_warmup
     mode: restart
     then:
-      - lambda: 'id(voc_raw_zero_warming) = true;'
+      - lambda: |-
+          id(voc_raw_zero_warming) = true;
+          const auto mode = id(voc_raw_zero_sync).current_option();
+          if (mode != "VOC Mean" && mode != "Off")
+            id(log_voc_raw_zero).execute("Warm-up: readings ignored for 10 min");
       - delay: 10min
       - lambda: 'id(voc_raw_zero_warming) = false;'
       - script.execute: sync_voc_raw_zero
+
+  # ----------------------------------------------------------
+  # LOG VOC RAW ZERO
+  #
+  # Puts an entry on SEN - VOC Raw Zero Offset Log, with the
+  # time once HA has sent it, and in the device log.
+  # ----------------------------------------------------------
+  - id: log_voc_raw_zero
+    parameters:
+      entry: string
+    then:
+      - lambda: |-
+          ESP_LOGI("voc_raw", "%s", entry.c_str());
+          auto now = id(ha_time).now();
+          id(voc_raw_zero_log).publish_state(
+              now.is_valid() ? now.strftime("%d %b %H:%M - ") + entry : entry);
 
   # ----------------------------------------------------------
   # FAN CLEAN CYCLE
