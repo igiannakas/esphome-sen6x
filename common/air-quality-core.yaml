@@ -67,20 +67,29 @@ esphome:
     - priority: -100
       then:
         # Cleanest air (N h) history as saved at the last full
-        # hour. On the first start with no history yet, the zero
-        # already in use seeds the current hour, so picking
-        # Cleanest air (N h) does not drop it; it ages out after
-        # the window like any other hour.
+        # hour. The current hour's cleanest reading is not saved
+        # yet, so on either Cleanest air (N h) option a zero above
+        # all of the saved history was that reading, and it goes
+        # back in as this hour's; the zero is saved within a
+        # minute of each change. On the first start with no
+        # history yet, the zero already in use seeds the current
+        # hour the same way, so picking Cleanest air (N h) does
+        # not drop it. Either ages out after the window like any
+        # other hour.
         - lambda: |-
             memcpy(id(voc_raw_best_hours), id(voc_raw_best_saved), sizeof(id(voc_raw_best_hours)));
             if (id(voc_raw_best_slot) >= ${voc_raw_zero_window_hours})
               id(voc_raw_best_slot) = 0;
-            bool empty = true;
+            float best = 0;
             for (float v : id(voc_raw_best_hours))
-              if (v > 0)
-                empty = false;
+              if (v > best)
+                best = v;
+            const auto mode = id(voc_raw_zero_sync).current_option();
+            const bool window_mode = mode == "Cleanest air (${voc_raw_zero_window_hours} h)" ||
+                                     mode == "Cleanest air (${voc_raw_zero_window_hours} h) + airing reset";
             const float zero = id(voc_raw_zero);
-            if (empty && !isnan(zero) && zero > 0 && zero < 65535)
+            if (!isnan(zero) && zero > 0 && zero < 65535 &&
+                (best <= 0 || (window_mode && zero > best)))
               id(voc_raw_best_hours)[id(voc_raw_best_slot)] = zero;
         - script.execute: voc_raw_zero_warmup
         - script.execute: update_led_brightness
@@ -294,7 +303,8 @@ globals:
   # hours, 0 = none yet. voc_raw_best_slot is the current hour.
   # The saved copy is written once an hour (see INTERVALS) and
   # read back at boot, so a restart carries on as if no time
-  # had passed. Seeded once from the zero in use (see on_boot).
+  # had passed, with the zero in use filling in the unsaved
+  # current hour (see on_boot).
   - id: voc_raw_best_hours
     type: float[${voc_raw_zero_window_hours}]
     restore_value: no
