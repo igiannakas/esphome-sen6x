@@ -406,6 +406,7 @@ sensor:
     name: "LED - Brightness"
     icon: mdi:brightness-percent
     entity_category: diagnostic
+    disabled_by_default: true
     unit_of_measurement: "%"
     accuracy_decimals: 0
     update_interval: never
@@ -776,11 +777,13 @@ sensor:
   - platform: internal_temperature
     name: "ESP - Temperature"
     entity_category: diagnostic
+    disabled_by_default: true
     update_interval: ${diag_interval}
 
   - platform: wifi_signal
     name: "ESP - WiFi Signal"
     entity_category: diagnostic
+    disabled_by_default: true
     update_interval: ${diag_interval}
 
   # Seconds since boot. Resets on a reboot; keeps climbing
@@ -789,6 +792,7 @@ sensor:
   - platform: uptime
     name: "ESP - Uptime"
     entity_category: diagnostic
+    disabled_by_default: true
     update_interval: ${diag_interval}
 
   # ----------------------------------------------------------

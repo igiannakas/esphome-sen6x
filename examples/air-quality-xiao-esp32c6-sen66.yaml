@@ -122,7 +122,7 @@ substitutions:
   temp_rate_interval_s: "30"
   temp_rate_window: "6"
 
-  window_open_rate_default: "-0.10"
+  window_open_rate_default: "-0.07"
   window_close_rate_default: "0.02"
   window_open_samples: "2"
   window_close_samples: "4"
