@@ -897,9 +897,10 @@ button:
   # reading, so VOC Raw reads 0 from here. Press again to take
   # a new one. Does nothing before the first reading after
   # boot. SEN - VOC Raw Zero Offset Sync presses it on its own
-  # on Cleanest air; on VOC Mean the next calibration update,
-  # and on Cleanest air (N h) the next reading, replaces what
-  # it set.
+  # on Cleanest air, and on VOC Mean the next calibration
+  # update replaces what it set. On Cleanest air (N h) it also
+  # clears that history and starts it again from this reading,
+  # so the zero stays here until cleaner air comes along.
   # ----------------------------------------------------------
   - platform: template
     id: voc_raw_set_zero
@@ -915,6 +916,17 @@ button:
               return;
             }
             ESP_LOGI("voc_raw", "Zero set at %.0f ticks", raw);
+            // Cleanest air (N h) would put the zero straight back on
+            // the window's best, so its history starts over from here.
+            // Saved at once, so a restart does not bring the old
+            // history back.
+            if (id(voc_raw_zero_sync).current_option() == "Cleanest air (${voc_raw_zero_window_hours} h)") {
+              for (float &v : id(voc_raw_best_hours))
+                v = 0;
+              id(voc_raw_best_hours)[id(voc_raw_best_slot)] = raw;
+              memcpy(id(voc_raw_best_saved), id(voc_raw_best_hours), sizeof(id(voc_raw_best_saved)));
+              ESP_LOGI("voc_raw", "Cleanest air history cleared");
+            }
             auto call = id(voc_raw_zero_offset).make_call();
             call.set_value(raw);
             call.perform();
@@ -1469,7 +1481,9 @@ select:
   #                  per hour, so it moves up with cleaner air
   #                  and back down as old clean hours drop out.
   #                  VOC Raw stays at 0 or above; readings
-  #                  during a warm-up are not counted.
+  #                  during a warm-up are not counted. SEN -
+  #                  VOC Raw Set Zero clears the history and
+  #                  starts it again from the current reading.
   #   Off            never moves on its own.
   #
   # Applies as soon as it is picked. Kept across restarts.
